@@ -40,6 +40,52 @@ class BlogScraper:
         logger.info(f"GraphQL failed for {url_key}, falling back to HTML scraping")
         return self._fetch_via_html(url_key)
 
+    def fetch_all_posts_via_graphql(self, page: int = 1) -> list[dict]:
+        """Fetch paginated blog post listing via GraphQL."""
+        query = """
+        query GetBlogPosts($page: Int!) {
+            amBlogPosts(type: ALL, page: $page) {
+                all_post_size
+                items {
+                    post_id
+                    title
+                    url_key
+                    short_content
+                    post_thumbnail
+                    list_thumbnail
+                    published_at
+                    categories
+                    tags {
+                        name
+                    }
+                }
+            }
+        }
+        """
+        try:
+            response = self.session.post(
+                self.graphql_url,
+                json={"query": query, "variables": {"page": page}},
+                headers={"Content-Type": "application/json"},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if "errors" in data:
+                logger.warning(f"GraphQL listing errors: {data['errors']}")
+                return []
+
+            posts_data = data.get("data", {}).get("amBlogPosts", {})
+            total = posts_data.get("all_post_size", 0)
+            items = posts_data.get("items", [])
+            logger.info(f"Fetched page {page}: {len(items)} posts (total: {total})")
+            return items
+
+        except Exception as e:
+            logger.warning(f"GraphQL listing failed: {e}")
+            return []
+
     def _fetch_via_graphql(self, url_key: str) -> dict | None:
         """Fetch blog post via Magento GraphQL API (Amasty Blog)."""
         query = """
@@ -49,16 +95,26 @@ class BlogScraper:
                 title
                 full_content
                 short_content
+                display_short_content
                 post_thumbnail
+                post_thumbnail_alt
                 list_thumbnail
+                list_thumbnail_alt
                 meta_title
                 meta_description
                 meta_tags
                 categories
-                tags
+                tags {
+                    name
+                }
                 url_key
                 published_at
+                created_at
+                updated_at
                 status
+                author_id
+                views
+                is_featured
             }
         }
         """
@@ -95,16 +151,29 @@ class BlogScraper:
 
         html_content = post_data.get("full_content") or post_data.get("short_content") or ""
 
+        # Tags come as objects with {name: ...} from GraphQL
+        raw_tags = post_data.get("tags", [])
+        if raw_tags and isinstance(raw_tags, list):
+            if isinstance(raw_tags[0], dict):
+                tags = [t.get("name", "") for t in raw_tags if t.get("name")]
+            else:
+                tags = raw_tags
+        else:
+            tags = []
+
         return {
             "title": post_data.get("title", ""),
             "html_content": html_content,
             "thumbnail": thumbnail,
+            "thumbnail_alt": post_data.get("post_thumbnail_alt", ""),
             "meta_title": post_data.get("meta_title", ""),
             "meta_description": post_data.get("meta_description", ""),
             "categories": post_data.get("categories", []),
-            "tags": post_data.get("tags", []),
+            "tags": tags,
             "url_key": post_data.get("url_key", ""),
             "published_at": post_data.get("published_at", ""),
+            "created_at": post_data.get("created_at", ""),
+            "updated_at": post_data.get("updated_at", ""),
             "images": self._extract_images_from_html(html_content),
             "source": "graphql",
         }
