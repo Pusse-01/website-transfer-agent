@@ -90,12 +90,15 @@ class ImageHandler:
             }
             content_type = content_types.get(ext, "image/jpeg")
 
+            upload_url = f"{self.BUILDER_UPLOAD_URL}?name={fname}"
             with open(local_path, "rb") as f:
-                files = {"file": (fname, f, content_type)}
                 response = requests.post(
-                    self.BUILDER_UPLOAD_URL,
-                    headers={"Authorization": f"Bearer {self.builder_api_key}"},
-                    files=files,
+                    upload_url,
+                    headers={
+                        "Authorization": f"Bearer {self.builder_api_key}",
+                        "Content-Type": content_type,
+                    },
+                    data=f,
                     timeout=60,
                 )
                 response.raise_for_status()

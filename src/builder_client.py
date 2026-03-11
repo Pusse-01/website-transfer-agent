@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class BuilderClient:
     """Client for Builder.io Content API to create and manage blog articles."""
 
-    BASE_URL = "https://cdn.builder.io/api/v3/write"
+    BASE_URL = "https://builder.io/api/v1/write"
 
     def __init__(self, api_key: str, model_name: str = "blog-article"):
         self.api_key = api_key
@@ -40,6 +40,8 @@ class BuilderClient:
         url_path = f"/blog/{blog_data.get('url_key', '')}"
 
         # Build the Builder.io content entry
+        # For data models (blog-article), HTML content goes in `body` field directly
+        # For page models, use `blocks` array instead
         entry = {
             "name": blog_data.get("title", "Untitled"),
             "published": "published" if publish else "draft",
@@ -61,10 +63,7 @@ class BuilderClient:
                 "categories": blog_data.get("categories", []),
                 "tags": blog_data.get("tags", []),
                 "blurb": blog_data.get("meta_description", ""),
-                # The main blog content as Builder.io blocks
-                "blocks": self._html_to_builder_blocks(
-                    blog_data.get("html_content", "")
-                ),
+                "body": blog_data.get("html_content", ""),
             },
         }
 
@@ -88,9 +87,7 @@ class BuilderClient:
             "date": blog_data.get("published_at", ""),
             "categories": blog_data.get("categories", []),
             "tags": blog_data.get("tags", []),
-            "blocks": self._html_to_builder_blocks(
-                blog_data.get("html_content", "")
-            ),
+            "body": blog_data.get("html_content", ""),
         }
 
         if custom_fields:
