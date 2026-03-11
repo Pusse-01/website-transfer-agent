@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+downloaded_images/
+*.xlsx
+*.csv
+output/
+logs/
