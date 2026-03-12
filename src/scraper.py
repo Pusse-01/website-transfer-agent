@@ -55,9 +55,8 @@ class BlogScraper:
                     list_thumbnail
                     published_at
                     categories
-                    tags {
-                        name
-                    }
+                    tags
+                    tag_ids
                 }
             }
         }
@@ -87,60 +86,88 @@ class BlogScraper:
             return []
 
     def _fetch_via_graphql(self, url_key: str) -> dict | None:
-        """Fetch blog post via Magento GraphQL API (Amasty Blog)."""
-        query = """
-        query GetBlogPost($urlKey: String!) {
-            amBlogPost(urlKey: $urlKey) {
-                post_id
-                title
-                full_content
-                short_content
-                display_short_content
-                post_thumbnail
-                post_thumbnail_alt
-                list_thumbnail
-                list_thumbnail_alt
-                meta_title
-                meta_description
-                meta_tags
-                categories
-                tags {
-                    name
-                }
-                url_key
-                published_at
-                created_at
-                updated_at
-                status
-                author_id
-                views
-                is_featured
-            }
-        }
+        """Fetch blog post via Magento GraphQL API (Amasty Blog).
+
+        Uses a progressive query strategy: starts with all fields, then
+        retries with fewer fields if the API rejects unknown ones.
         """
-        try:
-            response = self.session.post(
-                self.graphql_url,
-                json={"query": query, "variables": {"urlKey": url_key}},
-                headers={"Content-Type": "application/json"},
-                timeout=30,
-            )
-            response.raise_for_status()
-            data = response.json()
+        # Full query - try first
+        queries = [
+            # Attempt 1: tags/categories as scalar fields
+            """
+            query GetBlogPost($urlKey: String!) {
+                amBlogPost(urlKey: $urlKey) {
+                    post_id
+                    title
+                    full_content
+                    short_content
+                    post_thumbnail
+                    post_thumbnail_alt
+                    list_thumbnail
+                    list_thumbnail_alt
+                    meta_title
+                    meta_description
+                    meta_tags
+                    categories
+                    tags
+                    tag_ids
+                    url_key
+                    published_at
+                    created_at
+                    updated_at
+                    status
+                    author_id
+                    views
+                    is_featured
+                }
+            }
+            """,
+            # Attempt 2: minimal safe fields only
+            """
+            query GetBlogPost($urlKey: String!) {
+                amBlogPost(urlKey: $urlKey) {
+                    post_id
+                    title
+                    full_content
+                    short_content
+                    post_thumbnail
+                    list_thumbnail
+                    meta_title
+                    meta_description
+                    url_key
+                    published_at
+                    status
+                }
+            }
+            """,
+        ]
 
-            if "errors" in data:
-                logger.warning(f"GraphQL errors for {url_key}: {data['errors']}")
+        for i, query in enumerate(queries):
+            try:
+                response = self.session.post(
+                    self.graphql_url,
+                    json={"query": query, "variables": {"urlKey": url_key}},
+                    headers={"Content-Type": "application/json"},
+                    timeout=30,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                if "errors" in data:
+                    logger.warning(f"GraphQL attempt {i+1} failed for {url_key}: {data['errors']}")
+                    continue  # Try next query variant
+
+                post_data = data.get("data", {}).get("amBlogPost")
+                if not post_data:
+                    return None
+
+                return self._normalize_graphql_post(post_data)
+
+            except Exception as e:
+                logger.warning(f"GraphQL request failed for {url_key}: {e}")
                 return None
 
-            post_data = data.get("data", {}).get("amBlogPost")
-            if not post_data:
-                return None
-
-            return self._normalize_graphql_post(post_data)
-
-        except Exception as e:
-            logger.warning(f"GraphQL request failed for {url_key}: {e}")
-            return None
+        return None
 
     def _normalize_graphql_post(self, post_data: dict) -> dict:
         """Normalize GraphQL response into a standard format."""
@@ -151,13 +178,15 @@ class BlogScraper:
 
         html_content = post_data.get("full_content") or post_data.get("short_content") or ""
 
-        # Tags come as objects with {name: ...} from GraphQL
-        raw_tags = post_data.get("tags", [])
-        if raw_tags and isinstance(raw_tags, list):
+        # Tags may come as a list of strings, list of objects, or a single string
+        raw_tags = post_data.get("tags") or []
+        if isinstance(raw_tags, str):
+            tags = [raw_tags] if raw_tags else []
+        elif isinstance(raw_tags, list) and raw_tags:
             if isinstance(raw_tags[0], dict):
                 tags = [t.get("name", "") for t in raw_tags if t.get("name")]
             else:
-                tags = raw_tags
+                tags = [str(t) for t in raw_tags if t]
         else:
             tags = []
 
