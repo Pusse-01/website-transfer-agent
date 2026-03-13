@@ -5,6 +5,7 @@ Builder.io client module for creating blog content entries via the Write API.
 import json
 import logging
 import time
+import uuid
 
 import requests
 
@@ -37,16 +38,27 @@ class BuilderClient:
         Returns:
             Builder.io API response dict
         """
-        url_path = f"/blog/{blog_data.get('url_key', '')}"
+        url_key = blog_data.get("url_key", "")
+        url_path = f"/blog/{url_key}"
 
-        # Build the Builder.io content entry
-        # For data models (blog-article), HTML content goes in `body` field directly
-        # For page models, use `blocks` array instead
+        # Convert tags to Builder.io format: [{"tag": "value"}, ...]
+        raw_tags = blog_data.get("tags", [])
+        builder_tags = []
+        for t in raw_tags:
+            if isinstance(t, dict):
+                builder_tags.append(t)
+            elif isinstance(t, str) and t:
+                builder_tags.append({"tag": t})
+
+        # Convert HTML content to Builder.io blocks format
+        blocks = self._html_to_builder_blocks(blog_data.get("html_content", ""))
+
         entry = {
             "name": blog_data.get("title", "Untitled"),
             "published": "published" if publish else "draft",
             "query": [
                 {
+                    "@type": "@builder.io/core:Query",
                     "property": "urlPath",
                     "operator": "is",
                     "value": url_path,
@@ -55,15 +67,19 @@ class BuilderClient:
             "data": {
                 "title": blog_data.get("title", ""),
                 "url": url_path,
-                "slug": blog_data.get("url_key", ""),
-                "description": blog_data.get("meta_description", ""),
-                "image": blog_data.get("thumbnail", ""),
-                "author": blog_data.get("author", ""),
-                "date": blog_data.get("published_at", ""),
-                "categories": blog_data.get("categories", []),
-                "tags": blog_data.get("tags", []),
-                "blurb": blog_data.get("meta_description", ""),
-                "body": blog_data.get("html_content", ""),
+                "slug": url_key,
+                "description": blog_data.get("meta_description", "") or blog_data.get("title", ""),
+                "excerpt": blog_data.get("meta_description", "") or blog_data.get("title", ""),
+                "coverImage": blog_data.get("thumbnail", ""),
+                "coverImageAlt": blog_data.get("thumbnail_alt", "") or blog_data.get("title", ""),
+                "publishDate": blog_data.get("published_at", "") or self._current_iso_date(),
+                "authorName": blog_data.get("author", ""),
+                "canonicalUrl": blog_data.get("canonical_url", ""),
+                "tags": builder_tags,
+                "noindex": False,
+                "nofollow": False,
+                "isFeatured": False,
+                "blocks": blocks,
             },
         }
 
@@ -76,18 +92,30 @@ class BuilderClient:
         Create a blog entry with additional custom fields.
         Useful when the Builder.io model has custom field definitions.
         """
-        url_path = f"/blog/{blog_data.get('url_key', '')}"
+        url_key = blog_data.get("url_key", "")
+        url_path = f"/blog/{url_key}"
+
+        raw_tags = blog_data.get("tags", [])
+        builder_tags = []
+        for t in raw_tags:
+            if isinstance(t, dict):
+                builder_tags.append(t)
+            elif isinstance(t, str) and t:
+                builder_tags.append({"tag": t})
+
+        blocks = self._html_to_builder_blocks(blog_data.get("html_content", ""))
 
         data_fields = {
             "title": blog_data.get("title", ""),
             "url": url_path,
-            "slug": blog_data.get("url_key", ""),
-            "description": blog_data.get("meta_description", ""),
-            "image": blog_data.get("thumbnail", ""),
-            "date": blog_data.get("published_at", ""),
-            "categories": blog_data.get("categories", []),
-            "tags": blog_data.get("tags", []),
-            "body": blog_data.get("html_content", ""),
+            "slug": url_key,
+            "description": blog_data.get("meta_description", "") or blog_data.get("title", ""),
+            "excerpt": blog_data.get("meta_description", "") or blog_data.get("title", ""),
+            "coverImage": blog_data.get("thumbnail", ""),
+            "coverImageAlt": blog_data.get("thumbnail_alt", "") or blog_data.get("title", ""),
+            "publishDate": blog_data.get("published_at", "") or self._current_iso_date(),
+            "tags": builder_tags,
+            "blocks": blocks,
         }
 
         if custom_fields:
@@ -98,6 +126,7 @@ class BuilderClient:
             "published": "published" if publish else "draft",
             "query": [
                 {
+                    "@type": "@builder.io/core:Query",
                     "property": "urlPath",
                     "operator": "is",
                     "value": url_path,
@@ -144,31 +173,74 @@ class BuilderClient:
         """
         Convert HTML content to Builder.io block format.
 
-        Builder.io uses a block-based content structure. We wrap the HTML
-        in a Custom HTML block to preserve the original formatting.
+        Uses a Custom Code block wrapping to preserve the original blog
+        formatting, inside a Section block for proper layout.
         """
         if not html_content:
             return []
 
-        # Use a single Custom HTML block to preserve the original blog formatting
-        # This ensures the content looks exactly like the source
         blocks = [
             {
                 "@type": "@builder.io/sdk:Element",
+                "@version": 2,
+                "id": f"builder-{uuid.uuid4().hex[:24]}",
                 "component": {
-                    "name": "Custom Code",
+                    "name": "Core:Section",
                     "options": {
-                        "code": html_content,
+                        "maxWidth": 900,
+                        "lazyLoad": False,
                     },
+                },
+                "children": [
+                    {
+                        "@type": "@builder.io/sdk:Element",
+                        "@version": 2,
+                        "id": f"builder-{uuid.uuid4().hex[:24]}",
+                        "component": {
+                            "name": "Custom Code",
+                            "options": {
+                                "code": html_content,
+                            },
+                        },
+                        "responsiveStyles": {
+                            "large": {
+                                "display": "flex",
+                                "flexDirection": "column",
+                                "position": "relative",
+                                "flexShrink": "0",
+                                "boxSizing": "border-box",
+                                "marginTop": "20px",
+                            }
+                        },
+                    }
+                ],
+                "responsiveStyles": {
+                    "large": {
+                        "display": "flex",
+                        "flexDirection": "column",
+                        "position": "relative",
+                        "flexShrink": "0",
+                        "boxSizing": "border-box",
+                        "marginTop": "0px",
+                        "paddingLeft": "20px",
+                        "paddingRight": "20px",
+                        "paddingTop": "20px",
+                        "paddingBottom": "20px",
+                        "minHeight": "100px",
+                    }
                 },
             }
         ]
 
         return blocks
 
+    def _current_iso_date(self) -> str:
+        """Return current datetime in ISO format."""
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
     def check_entry_exists(self, url_key: str) -> bool:
         """Check if a blog entry with this URL key already exists."""
-        url_path = f"/blog/{url_key}"
         check_url = (
             f"https://cdn.builder.io/api/v3/content/{self.model_name}"
             f"?apiKey={self.api_key}"
@@ -202,4 +274,39 @@ class BuilderClient:
             return data.get("results", [])
         except Exception as e:
             logger.error(f"Failed to list entries: {e}")
+            return []
+
+    def fetch_entry_full(self, slug: str = None, include_unpublished: bool = True) -> dict | None:
+        """Fetch a full entry by slug, including blocks and all data fields."""
+        params = f"apiKey={self.api_key}&limit=1"
+        if slug:
+            params += f"&query.data.slug={slug}"
+        if include_unpublished:
+            params += "&includeUnpublished=true"
+
+        url = f"https://cdn.builder.io/api/v3/content/{self.model_name}?{params}"
+        try:
+            response = self.session.get(url, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            results = data.get("results", [])
+            return results[0] if results else None
+        except Exception as e:
+            logger.error(f"Failed to fetch entry {slug}: {e}")
+            return None
+
+    def fetch_all_entries(self, limit: int = 100, include_unpublished: bool = True) -> list[dict]:
+        """Fetch all entries with full data."""
+        params = f"apiKey={self.api_key}&limit={limit}"
+        if include_unpublished:
+            params += "&includeUnpublished=true"
+
+        url = f"https://cdn.builder.io/api/v3/content/{self.model_name}?{params}"
+        try:
+            response = self.session.get(url, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("results", [])
+        except Exception as e:
+            logger.error(f"Failed to fetch entries: {e}")
             return []

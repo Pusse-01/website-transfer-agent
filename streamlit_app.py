@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 from src.scraper import BlogScraper
@@ -46,6 +47,8 @@ if "scrape_log" not in st.session_state:
     st.session_state.scrape_log = []
 if "upload_results" not in st.session_state:
     st.session_state.upload_results = {}
+if "builder_entries" not in st.session_state:
+    st.session_state.builder_entries = []
 
 # ---------------------------------------------------------------------------
 # Sidebar - Configuration
@@ -63,16 +66,21 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("Builder.io (Optional)")
-    builder_api_key = st.text_input(
-        "Private API Key",
+    st.subheader("Builder.io")
+    builder_public_key = st.text_input(
+        "Public API Key",
+        value=os.getenv("BUILDER_PUBLIC_KEY", "6be3ec8a86714634979b0d3ca2064d06"),
+        help="Used for reading content from Builder.io",
+    )
+    builder_private_key = st.text_input(
+        "Private API Key (optional)",
         value=os.getenv("BUILDER_API_KEY", ""),
         type="password",
         help="Required only for uploading to Builder.io",
     )
     builder_model = st.text_input(
         "Model Name",
-        value=os.getenv("BUILDER_MODEL_NAME", "blog-article"),
+        value=os.getenv("BUILDER_MODEL_NAME", "blog-post"),
     )
 
     st.divider()
@@ -84,12 +92,89 @@ with st.sidebar:
     st.metric("Posts Uploaded", uploaded_count)
 
 # ---------------------------------------------------------------------------
+# Helper: extract HTML from Builder.io blocks
+# ---------------------------------------------------------------------------
+def extract_html_from_blocks(blocks: list) -> str:
+    """Recursively extract HTML content from Builder.io blocks."""
+    html_parts = []
+    for block in blocks:
+        comp = block.get("component", {})
+        name = comp.get("name", "")
+
+        # Custom Code block - contains raw HTML
+        if name == "Custom Code":
+            code = comp.get("options", {}).get("code", "")
+            if code:
+                html_parts.append(code)
+
+        # Text block
+        elif name == "Text":
+            text = comp.get("options", {}).get("text", "")
+            if text:
+                html_parts.append(text)
+
+        # Image block
+        elif name == "Image":
+            opts = comp.get("options", {})
+            img_url = opts.get("image", "")
+            alt = opts.get("altText", "")
+            if img_url:
+                html_parts.append(f'<img src="{img_url}" alt="{alt}" style="max-width:100%" />')
+
+        # Recurse into children
+        children = block.get("children", [])
+        if children:
+            html_parts.append(extract_html_from_blocks(children))
+
+        # Handle Columns
+        if name == "Columns":
+            columns = comp.get("options", {}).get("columns", [])
+            for col in columns:
+                col_blocks = col.get("blocks", [])
+                if col_blocks:
+                    html_parts.append(extract_html_from_blocks(col_blocks))
+
+    return "\n".join(html_parts)
+
+
+def builder_entry_to_preview_data(entry: dict) -> dict:
+    """Convert a Builder.io entry to our standard post_data format for preview."""
+    data = entry.get("data", {})
+    blocks = data.get("blocks", [])
+
+    # Extract HTML from blocks
+    html_content = extract_html_from_blocks(blocks)
+
+    # Extract tags
+    raw_tags = data.get("tags", [])
+    tags = []
+    for t in raw_tags:
+        if isinstance(t, dict):
+            tags.append(t.get("tag", ""))
+        elif isinstance(t, str):
+            tags.append(t)
+
+    return {
+        "title": data.get("title", entry.get("name", "")),
+        "html_content": html_content,
+        "thumbnail": data.get("coverImage", ""),
+        "thumbnail_alt": data.get("coverImageAlt", ""),
+        "meta_description": data.get("description", ""),
+        "tags": tags,
+        "categories": [],
+        "url_key": data.get("slug", ""),
+        "published_at": data.get("publishDate", ""),
+        "source": "builder.io",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main content
 # ---------------------------------------------------------------------------
 st.title("Blog Migration Dashboard")
 
-tab_input, tab_preview, tab_upload, tab_results = st.tabs(
-    ["1. Input & Scrape", "2. Preview", "3. Upload to Builder.io", "4. Results"]
+tab_input, tab_preview, tab_builder, tab_upload, tab_results = st.tabs(
+    ["1. Input & Scrape", "2. Preview", "3. Builder.io Content", "4. Upload to Builder.io", "5. Results"]
 )
 
 # ========================== TAB 1: INPUT & SCRAPE ==========================
@@ -120,7 +205,6 @@ with tab_input:
             type=["xlsx", "xls"],
         )
         if uploaded_file:
-            # Save to temp file for openpyxl
             with tempfile.NamedTemporaryFile(
                 suffix=".xlsx", delete=False
             ) as tmp:
@@ -131,8 +215,6 @@ with tab_input:
                 blog_posts = read_blog_list(tmp_path)
                 if blog_posts:
                     st.success(f"Found {len(blog_posts)} blog posts in Excel file")
-
-                    # Show preview table
                     preview_data = [
                         {
                             "Priority": p.get("priority", ""),
@@ -143,7 +225,6 @@ with tab_input:
                         for p in blog_posts
                     ]
                     st.dataframe(preview_data, use_container_width=True)
-
                     url_keys_to_scrape = [p["url_key"] for p in blog_posts]
                 else:
                     st.error("No blog posts found in the Excel file.")
@@ -231,7 +312,6 @@ with tab_preview:
     if not st.session_state.scraped_posts:
         st.info("No scraped posts yet. Go to **Input & Scrape** tab first.")
     else:
-        # Post selector
         post_keys = list(st.session_state.scraped_posts.keys())
         post_labels = [
             f"{st.session_state.scraped_posts[k].get('title', k)} ({k})"
@@ -257,7 +337,7 @@ with tab_preview:
                 st.markdown(f"**Images:** {len(post_data.get('images', []))}")
             with meta_cols[2]:
                 st.markdown(
-                    f"**Tags:** {', '.join(post_data.get('tags', [])) or 'None'}"
+                    f"**Tags:** {', '.join(str(t) for t in post_data.get('tags', [])) or 'None'}"
                 )
                 cats = post_data.get("categories", [])
                 if isinstance(cats, list):
@@ -266,14 +346,9 @@ with tab_preview:
                     cats_str = str(cats) or "None"
                 st.markdown(f"**Categories:** {cats_str}")
 
-        # Generate and render the HTML preview in an iframe
         preview_html = generate_blog_preview_html(post_data, base_url=source_url)
 
         st.markdown("---")
-
-        # Render in iframe via st.components
-        import streamlit.components.v1 as components
-
         components.html(preview_html, height=800, scrolling=True)
 
         # Buttons row
@@ -301,11 +376,117 @@ with tab_preview:
                 st.code(post_data.get("html_content", ""), language="html")
 
 
-# ========================== TAB 3: UPLOAD ==========================
+# ========================== TAB 3: BUILDER.IO CONTENT ==========================
+with tab_builder:
+    st.subheader("Builder.io Content Browser")
+
+    if not builder_public_key:
+        st.warning("Enter a Builder.io **Public API Key** in the sidebar to browse content.")
+    else:
+        col_fetch, col_info = st.columns([1, 3])
+        with col_fetch:
+            fetch_clicked = st.button(
+                "Fetch Content from Builder.io", type="primary", use_container_width=True
+            )
+
+        if fetch_clicked:
+            with st.spinner("Fetching entries from Builder.io..."):
+                client = BuilderClient(builder_public_key, builder_model)
+                entries = client.fetch_all_entries(limit=50, include_unpublished=True)
+                st.session_state.builder_entries = entries
+                if entries:
+                    st.success(f"Fetched {len(entries)} entries from Builder.io")
+                else:
+                    st.warning("No entries found. Check your API key and model name.")
+
+        if st.session_state.builder_entries:
+            entries = st.session_state.builder_entries
+
+            # Summary table
+            table_data = []
+            for entry in entries:
+                data = entry.get("data", {})
+                table_data.append({
+                    "Name": entry.get("name", ""),
+                    "Title": data.get("title", ""),
+                    "Slug": data.get("slug", ""),
+                    "Status": entry.get("published", ""),
+                    "Publish Date": data.get("publishDate", "N/A"),
+                    "Has Blocks": "Yes" if data.get("blocks") else "No",
+                    "Has Cover": "Yes" if data.get("coverImage") else "No",
+                })
+            st.dataframe(table_data, use_container_width=True)
+
+            # Select entry to preview
+            st.divider()
+            entry_labels = [
+                f"{e.get('name', 'Untitled')} ({e.get('data', {}).get('slug', 'no-slug')}) — {e.get('published', '')}"
+                for e in entries
+            ]
+
+            selected_entry_idx = st.selectbox(
+                "Select an entry to preview",
+                range(len(entries)),
+                format_func=lambda i: entry_labels[i],
+                key="builder_entry_select",
+            )
+
+            selected_entry = entries[selected_entry_idx]
+            entry_data = selected_entry.get("data", {})
+
+            # Metadata
+            with st.expander("Entry Metadata", expanded=False):
+                meta_cols = st.columns(3)
+                with meta_cols[0]:
+                    st.markdown(f"**ID:** `{selected_entry.get('id', '')}`")
+                    st.markdown(f"**Slug:** `{entry_data.get('slug', '')}`")
+                    st.markdown(f"**Status:** `{selected_entry.get('published', '')}`")
+                with meta_cols[1]:
+                    st.markdown(f"**Description:** {entry_data.get('description', 'N/A')}")
+                    st.markdown(f"**Excerpt:** {entry_data.get('excerpt', 'N/A')}")
+                    st.markdown(f"**Author:** {entry_data.get('authorName', 'N/A')}")
+                with meta_cols[2]:
+                    st.markdown(f"**Publish Date:** {entry_data.get('publishDate', 'N/A')}")
+                    cover = entry_data.get("coverImage", "")
+                    st.markdown(f"**Cover Image:** {'Yes' if cover else 'No'}")
+                    tags = entry_data.get("tags", [])
+                    tag_strs = [t.get("tag", str(t)) if isinstance(t, dict) else str(t) for t in tags]
+                    st.markdown(f"**Tags:** {', '.join(tag_strs) or 'None'}")
+
+            # Cover image preview
+            cover_image = entry_data.get("coverImage", "")
+            if cover_image:
+                st.image(cover_image, caption="Cover Image", width=400)
+
+            # Render blocks as HTML preview
+            blocks = entry_data.get("blocks", [])
+            if blocks:
+                st.markdown("### Page Preview")
+                preview_post = builder_entry_to_preview_data(selected_entry)
+                preview_html = generate_blog_preview_html(preview_post)
+                components.html(preview_html, height=800, scrolling=True)
+            else:
+                st.warning("This entry has no content blocks. The page will appear empty in the editor.")
+
+            # Raw JSON viewer
+            with st.expander("Raw Entry JSON"):
+                st.json(selected_entry)
+
+            # Download
+            st.download_button(
+                "Download Entry JSON",
+                data=json.dumps(selected_entry, indent=2, ensure_ascii=False),
+                file_name=f"builder_{entry_data.get('slug', 'entry')}.json",
+                mime="application/json",
+                key="builder_dl_json",
+            )
+
+
+# ========================== TAB 4: UPLOAD ==========================
 with tab_upload:
     st.subheader("Upload to Builder.io")
 
-    if not builder_api_key or builder_api_key == "your_builder_private_api_key_here":
+    if not builder_private_key or builder_private_key == "your_builder_private_api_key_here":
         st.warning(
             "**Private API key not configured.** "
             "Enter your Builder.io Private API Key in the sidebar to enable uploads. "
@@ -329,8 +510,8 @@ with tab_upload:
             st.info(f"Will upload **{len(selected_keys)}** post(s) to Builder.io model `{builder_model}`")
 
             if st.button("Upload to Builder.io", type="primary"):
-                builder = BuilderClient(builder_api_key, builder_model)
-                image_handler = ImageHandler(builder_api_key)
+                builder = BuilderClient(builder_private_key, builder_model)
+                image_handler = ImageHandler(builder_private_key)
                 progress = st.progress(0)
                 status = st.empty()
 
@@ -371,7 +552,7 @@ with tab_upload:
                 status.markdown("**Upload complete!**")
 
 
-# ========================== TAB 4: RESULTS ==========================
+# ========================== TAB 5: RESULTS ==========================
 with tab_results:
     st.subheader("Migration Results")
 
@@ -453,4 +634,5 @@ with tab_results:
         st.session_state.selected_post = None
         st.session_state.scrape_log = []
         st.session_state.upload_results = {}
+        st.session_state.builder_entries = []
         st.rerun()
