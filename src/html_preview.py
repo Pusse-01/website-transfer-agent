@@ -3,6 +3,8 @@ HTML preview generator for blog posts.
 Generates a self-contained HTML page that can be rendered in an iframe.
 """
 
+from .css_processor import process_html_for_builder
+
 
 def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
     """
@@ -205,7 +207,7 @@ def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
     </div>
     {thumbnail_html}
     <div class="blog-content">
-        {html_content}
+        {process_html_for_builder(html_content)}
     </div>
 </body>
 </html>"""

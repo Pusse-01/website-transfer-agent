@@ -9,6 +9,8 @@ import uuid
 
 import requests
 
+from .css_processor import process_html_for_builder
+
 logger = logging.getLogger(__name__)
 
 
@@ -173,11 +175,14 @@ class BuilderClient:
         """
         Convert HTML content to Builder.io block format.
 
-        Uses a Custom Code block wrapping to preserve the original blog
-        formatting, inside a Section block for proper layout.
+        Processes the HTML to fix CSS selectors and add base layout styles,
+        then wraps in a Custom Code block inside a Section for proper layout.
         """
         if not html_content:
             return []
+
+        # Process HTML to fix Magento Page Builder CSS and add base styles
+        html_content = process_html_for_builder(html_content)
 
         blocks = [
             {
