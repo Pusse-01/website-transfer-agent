@@ -1,5 +1,9 @@
 """
-Builder.io client module for creating blog content entries via the Write API.
+Builder.io client module for creating content entries via the Write API.
+
+Supports two content models:
+- 'blog-post': For blog articles, saved under /blog/<url_key>
+- 'page': For static CMS pages, saved under /<url_key>
 """
 
 import json
@@ -14,12 +18,19 @@ from .css_processor import process_html_for_builder
 logger = logging.getLogger(__name__)
 
 
+# Builder.io Write API rate limits (approximate):
+# - 50 requests per 10 seconds for write operations
+# - We add conservative delays to stay well within limits
+WRITE_DELAY_SECONDS = 1.0
+READ_DELAY_SECONDS = 0.3
+
+
 class BuilderClient:
-    """Client for Builder.io Content API to create and manage blog articles."""
+    """Client for Builder.io Content API to create and manage content entries."""
 
     BASE_URL = "https://builder.io/api/v1/write"
 
-    def __init__(self, api_key: str, model_name: str = "blog-article"):
+    def __init__(self, api_key: str, model_name: str = "blog-post"):
         self.api_key = api_key
         self.model_name = model_name
         self.session = requests.Session()
@@ -27,10 +38,12 @@ class BuilderClient:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         })
+        self._request_count = 0
+        self._last_request_time = 0.0
 
     def create_blog_entry(self, blog_data: dict, publish: bool = False) -> dict:
         """
-        Create a new blog article entry in Builder.io.
+        Create a new blog article entry in Builder.io under the 'blog-post' model.
 
         Args:
             blog_data: Dict with keys: title, html_content, thumbnail, url_key,
@@ -38,12 +51,12 @@ class BuilderClient:
             publish: Whether to publish immediately or save as draft
 
         Returns:
-            Builder.io API response dict
+            Dict with 'success' bool and 'data' or 'error'
         """
         url_key = blog_data.get("url_key", "")
         url_path = f"/blog/{url_key}"
 
-        # Convert tags to Builder.io format: [{"tag": "value"}, ...]
+        # Convert tags to Builder.io format
         raw_tags = blog_data.get("tags", [])
         builder_tags = []
         for t in raw_tags:
@@ -85,46 +98,34 @@ class BuilderClient:
             },
         }
 
-        return self._create_content(entry)
+        # Preserve meta fields
+        if blog_data.get("meta_title"):
+            entry["data"]["metaTitle"] = blog_data["meta_title"]
+        if blog_data.get("meta_description"):
+            entry["data"]["metaDescription"] = blog_data["meta_description"]
 
-    def create_blog_entry_with_custom_fields(
-        self, blog_data: dict, custom_fields: dict = None, publish: bool = False
-    ) -> dict:
+        return self._create_content(entry, model_override="blog-post")
+
+    def create_static_page_entry(self, page_data: dict, publish: bool = False) -> dict:
         """
-        Create a blog entry with additional custom fields.
-        Useful when the Builder.io model has custom field definitions.
+        Create a new static page entry in Builder.io under the 'page' model.
+
+        Args:
+            page_data: Dict with keys: title, html_content, url_key,
+                       meta_title, meta_description
+            publish: Whether to publish immediately or save as draft
+
+        Returns:
+            Dict with 'success' bool and 'data' or 'error'
         """
-        url_key = blog_data.get("url_key", "")
-        url_path = f"/blog/{url_key}"
+        url_key = page_data.get("url_key", "")
+        # Static pages go directly under root path
+        url_path = f"/{url_key}" if url_key else "/"
 
-        raw_tags = blog_data.get("tags", [])
-        builder_tags = []
-        for t in raw_tags:
-            if isinstance(t, dict):
-                builder_tags.append(t)
-            elif isinstance(t, str) and t:
-                builder_tags.append({"tag": t})
-
-        blocks = self._html_to_builder_blocks(blog_data.get("html_content", ""))
-
-        data_fields = {
-            "title": blog_data.get("title", ""),
-            "url": url_path,
-            "slug": url_key,
-            "description": blog_data.get("meta_description", "") or blog_data.get("title", ""),
-            "excerpt": blog_data.get("meta_description", "") or blog_data.get("title", ""),
-            "coverImage": blog_data.get("thumbnail", ""),
-            "coverImageAlt": blog_data.get("thumbnail_alt", "") or blog_data.get("title", ""),
-            "publishDate": blog_data.get("published_at", "") or self._current_iso_date(),
-            "tags": builder_tags,
-            "blocks": blocks,
-        }
-
-        if custom_fields:
-            data_fields.update(custom_fields)
+        blocks = self._html_to_builder_blocks(page_data.get("html_content", ""))
 
         entry = {
-            "name": blog_data.get("title", "Untitled"),
+            "name": page_data.get("title", "Untitled"),
             "published": "published" if publish else "draft",
             "query": [
                 {
@@ -134,28 +135,60 @@ class BuilderClient:
                     "value": url_path,
                 }
             ],
-            "data": data_fields,
+            "data": {
+                "title": page_data.get("title", ""),
+                "url": url_path,
+                "slug": url_key,
+                "blocks": blocks,
+            },
         }
 
-        return self._create_content(entry)
+        # Preserve meta fields
+        if page_data.get("meta_title"):
+            entry["data"]["metaTitle"] = page_data["meta_title"]
+        if page_data.get("meta_description"):
+            entry["data"]["metaDescription"] = page_data["meta_description"]
+        if page_data.get("meta_keywords"):
+            entry["data"]["metaKeywords"] = page_data["meta_keywords"]
+        if page_data.get("thumbnail"):
+            entry["data"]["coverImage"] = page_data["thumbnail"]
 
-    def _create_content(self, entry: dict) -> dict:
-        """Send the content creation request to Builder.io."""
-        url = f"{self.BASE_URL}/{self.model_name}"
+        return self._create_content(entry, model_override="page")
+
+    def create_entry(self, page_data: dict, page_type: str = "blog", publish: bool = False) -> dict:
+        """
+        Unified entry creation - routes to blog or static page based on page_type.
+
+        Args:
+            page_data: Page content dict
+            page_type: 'blog' or 'static'
+            publish: Whether to publish immediately
+        """
+        if page_type == "static":
+            return self.create_static_page_entry(page_data, publish)
+        else:
+            return self.create_blog_entry(page_data, publish)
+
+    def _create_content(self, entry: dict, model_override: str = None) -> dict:
+        """Send the content creation request to Builder.io with rate limiting."""
+        model = model_override or self.model_name
+        url = f"{self.BASE_URL}/{model}"
+
+        # Rate limiting
+        self._rate_limit(WRITE_DELAY_SECONDS)
 
         try:
             response = self.session.post(url, json=entry, timeout=60)
 
             if response.status_code == 429:
-                # Rate limited - wait and retry
-                retry_after = int(response.headers.get("Retry-After", 5))
-                logger.warning(f"Rate limited, waiting {retry_after}s...")
+                retry_after = int(response.headers.get("Retry-After", 10))
+                logger.warning(f"Rate limited by Builder.io, waiting {retry_after}s...")
                 time.sleep(retry_after)
                 response = self.session.post(url, json=entry, timeout=60)
 
             response.raise_for_status()
             result = response.json()
-            logger.info(f"Created Builder.io entry: {entry['name']}")
+            logger.info(f"Created Builder.io entry: {entry['name']} (model: {model})")
             return {"success": True, "data": result}
 
         except requests.exceptions.HTTPError as e:
@@ -171,12 +204,25 @@ class BuilderClient:
             logger.error(f"Failed to create Builder.io entry: {e}")
             return {"success": False, "error": str(e)}
 
+    def _rate_limit(self, min_delay: float):
+        """Enforce minimum delay between API requests."""
+        now = time.time()
+        elapsed = now - self._last_request_time
+        if elapsed < min_delay:
+            sleep_time = min_delay - elapsed
+            logger.debug(f"Rate limiting: sleeping {sleep_time:.1f}s")
+            time.sleep(sleep_time)
+        self._last_request_time = time.time()
+        self._request_count += 1
+
     def _html_to_builder_blocks(self, html_content: str) -> list[dict]:
         """
         Convert HTML content to Builder.io block format.
 
-        Processes the HTML to fix CSS selectors and add base layout styles,
-        then wraps in a Custom Code block inside a Section for proper layout.
+        Creates a Section > Custom Code structure that preserves the original
+        layout while still being editable in Builder.io's visual editor.
+        Users can drag/drop additional blocks around the migrated content,
+        and edit text within Custom Code blocks.
         """
         if not html_content:
             return []
@@ -244,10 +290,13 @@ class BuilderClient:
         from datetime import datetime, timezone
         return datetime.now(timezone.utc).isoformat()
 
-    def check_entry_exists(self, url_key: str) -> bool:
-        """Check if a blog entry with this URL key already exists."""
+    def check_entry_exists(self, url_key: str, model_override: str = None) -> bool:
+        """Check if an entry with this URL key already exists."""
+        model = model_override or self.model_name
+        self._rate_limit(READ_DELAY_SECONDS)
+
         check_url = (
-            f"https://cdn.builder.io/api/v3/content/{self.model_name}"
+            f"https://cdn.builder.io/api/v3/content/{model}"
             f"?apiKey={self.api_key}"
             f"&query.data.slug={url_key}"
             f"&limit=1"
@@ -263,10 +312,13 @@ class BuilderClient:
             logger.warning(f"Could not check for existing entry {url_key}: {e}")
             return False
 
-    def list_entries(self, limit: int = 25, offset: int = 0) -> list[dict]:
-        """List existing blog entries in Builder.io."""
+    def list_entries(self, limit: int = 25, offset: int = 0, model_override: str = None) -> list[dict]:
+        """List existing entries in Builder.io."""
+        model = model_override or self.model_name
+        self._rate_limit(READ_DELAY_SECONDS)
+
         url = (
-            f"https://cdn.builder.io/api/v3/content/{self.model_name}"
+            f"https://cdn.builder.io/api/v3/content/{model}"
             f"?apiKey={self.api_key}"
             f"&limit={limit}"
             f"&offset={offset}"
@@ -281,15 +333,18 @@ class BuilderClient:
             logger.error(f"Failed to list entries: {e}")
             return []
 
-    def fetch_entry_full(self, slug: str = None, include_unpublished: bool = True) -> dict | None:
-        """Fetch a full entry by slug, including blocks and all data fields."""
+    def fetch_entry_full(self, slug: str = None, include_unpublished: bool = True, model_override: str = None) -> dict | None:
+        """Fetch a full entry by slug."""
+        model = model_override or self.model_name
+        self._rate_limit(READ_DELAY_SECONDS)
+
         params = f"apiKey={self.api_key}&limit=1"
         if slug:
             params += f"&query.data.slug={slug}"
         if include_unpublished:
             params += "&includeUnpublished=true"
 
-        url = f"https://cdn.builder.io/api/v3/content/{self.model_name}?{params}"
+        url = f"https://cdn.builder.io/api/v3/content/{model}?{params}"
         try:
             response = self.session.get(url, timeout=15)
             response.raise_for_status()
@@ -300,13 +355,16 @@ class BuilderClient:
             logger.error(f"Failed to fetch entry {slug}: {e}")
             return None
 
-    def fetch_all_entries(self, limit: int = 100, include_unpublished: bool = True) -> list[dict]:
+    def fetch_all_entries(self, limit: int = 100, include_unpublished: bool = True, model_override: str = None) -> list[dict]:
         """Fetch all entries with full data."""
+        model = model_override or self.model_name
+        self._rate_limit(READ_DELAY_SECONDS)
+
         params = f"apiKey={self.api_key}&limit={limit}"
         if include_unpublished:
             params += "&includeUnpublished=true"
 
-        url = f"https://cdn.builder.io/api/v3/content/{self.model_name}?{params}"
+        url = f"https://cdn.builder.io/api/v3/content/{model}?{params}"
         try:
             response = self.session.get(url, timeout=15)
             response.raise_for_status()

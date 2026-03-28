@@ -1,6 +1,14 @@
 """
-Blog Migration Agent - Orchestrates the full blog migration pipeline.
-Scrapes blog content from source website, processes images, and uploads to Builder.io.
+Migration Agent - Orchestrates the full page migration pipeline.
+
+Handles both blog posts and static CMS pages:
+1. Read page list from Excel
+2. Scrape content from source (GraphQL + HTML fallback)
+3. Process images (download + re-upload to Builder.io)
+4. Upload content to Builder.io (blog-post or page model)
+5. Track status and export results
+
+Every step is logged with the page_key for filtering.
 """
 
 import json
@@ -9,29 +17,44 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .scraper import BlogScraper
+from .scraper import BlogScraper, StaticPageScraper
 from .image_handler import ImageHandler
 from .builder_client import BuilderClient
-from .excel_reader import read_blog_list
+from .excel_reader import read_blog_list, read_static_page_list, detect_excel_type
+from .migration_logger import MigrationLogger
 
 logger = logging.getLogger(__name__)
 
+# Migration status constants
+STATUS_PUBLISHED = "published_by_agent"
+STATUS_FAILED = "failed"
+STATUS_SKIPPED = "skipped"
+STATUS_PENDING = "pending"
+STATUS_CANCELLED = "cancelled"
+STATUS_NEEDS_REVIEW = "needs_human_review"
+
 
 class MigrationAgent:
-    """Orchestrates blog migration from source website to Builder.io."""
+    """Orchestrates page migration from source website to Builder.io."""
 
     def __init__(
         self,
         source_base_url: str,
         builder_api_key: str,
-        builder_model: str = "blog-article",
+        builder_model: str = "blog-post",
         blog_path: str = "/blog/",
         download_dir: str = "downloaded_images",
+        run_id: str = None,
     ):
-        self.scraper = BlogScraper(source_base_url, blog_path)
+        self.source_base_url = source_base_url
+        self.blog_scraper = BlogScraper(source_base_url, blog_path)
+        self.static_scraper = StaticPageScraper(source_base_url)
         self.image_handler = ImageHandler(builder_api_key, download_dir)
         self.builder = BuilderClient(builder_api_key, builder_model)
-        self.source_base_url = source_base_url
+        self.blog_path = blog_path
+
+        # Logger
+        self.mlog = MigrationLogger(run_id=run_id)
 
         # Migration state
         self.results = {
@@ -41,6 +64,7 @@ class MigrationAgent:
             "success": 0,
             "failed": 0,
             "skipped": 0,
+            "needs_review": 0,
             "details": [],
         }
 
@@ -52,172 +76,424 @@ class MigrationAgent:
         limit: int = 0,
         priority_filter: int = 0,
         dry_run: bool = False,
+        progress_callback=None,
     ) -> dict:
         """
-        Migrate blog posts listed in an Excel file.
+        Migrate pages listed in an Excel file.
+        Auto-detects whether it's a blog post list or static page list.
 
         Args:
-            excel_path: Path to the Excel file with blog post list
+            excel_path: Path to the Excel file
             publish: Whether to publish posts immediately
             skip_existing: Skip posts that already exist in Builder.io
             limit: Max number of posts to migrate (0 = all)
             priority_filter: Only migrate posts with priority <= this value (0 = all)
-            dry_run: If True, scrape content but don't upload to Builder.io
+            dry_run: If True, scrape content but don't upload
+            progress_callback: Optional callback fn(current, total, page_key, status_msg)
         """
+        self.mlog.info("__pipeline__", "", "init", f"Starting migration from Excel: {excel_path}")
+
+        excel_type = detect_excel_type(excel_path)
+        self.mlog.info("__pipeline__", "", "excel_read", f"Detected Excel type: {excel_type}")
+
+        if excel_type == "blog":
+            return self._migrate_blog_from_excel(
+                excel_path, publish, skip_existing, limit, priority_filter, dry_run, progress_callback
+            )
+        elif excel_type == "static":
+            return self._migrate_static_from_excel(
+                excel_path, publish, skip_existing, limit, dry_run, progress_callback
+            )
+        else:
+            self.mlog.error("__pipeline__", "", "excel_read",
+                            f"Could not detect Excel type. Please check the file format.")
+            return self.results
+
+    def _migrate_blog_from_excel(
+        self, excel_path, publish, skip_existing, limit, priority_filter, dry_run, progress_callback
+    ) -> dict:
+        """Migrate blog posts from a Blog Post List Excel."""
         blog_posts = read_blog_list(excel_path)
         if not blog_posts:
-            logger.error("No blog posts found in Excel file")
+            self.mlog.error("__pipeline__", "blog", "excel_read", "No published blog posts found in Excel file")
             return self.results
+
+        self.mlog.info("__pipeline__", "blog", "excel_read",
+                       f"Loaded {len(blog_posts)} published blog posts from Excel")
 
         # Apply priority filter
         if priority_filter > 0:
-            blog_posts = [p for p in blog_posts if p.get("priority", 0) and p["priority"] <= priority_filter]
+            blog_posts = [p for p in blog_posts if p.get("priority") and int(p["priority"]) <= priority_filter]
 
         # Apply limit
         if limit > 0:
             blog_posts = blog_posts[:limit]
 
-        url_keys = [p["url_key"] for p in blog_posts]
-        return self.migrate_posts(url_keys, publish, skip_existing, dry_run)
+        pages_to_migrate = []
+        for post in blog_posts:
+            pages_to_migrate.append({
+                "url_key": post["url_key"],
+                "title": post.get("title", ""),
+                "page_type": "blog",
+                "primary_url": f"{self.source_base_url}{self.blog_path}{post['url_key']}",
+                "original_data": post,
+            })
+
+        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback)
+
+    def _migrate_static_from_excel(
+        self, excel_path, publish, skip_existing, limit, dry_run, progress_callback
+    ) -> dict:
+        """Migrate static pages from a Static Page List Excel."""
+        static_pages = read_static_page_list(excel_path)
+        if not static_pages:
+            self.mlog.error("__pipeline__", "static", "excel_read", "No static pages found in Excel file")
+            return self.results
+
+        self.mlog.info("__pipeline__", "static", "excel_read",
+                       f"Loaded {len(static_pages)} static pages from Excel")
+
+        if limit > 0:
+            static_pages = static_pages[:limit]
+
+        pages_to_migrate = []
+        for page in static_pages:
+            pages_to_migrate.append({
+                "url_key": page["url_key"],
+                "title": page.get("title", ""),
+                "page_type": "static",
+                "primary_url": page.get("primary_url", ""),
+                "original_data": page,
+            })
+
+        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback)
 
     def migrate_from_url_keys(
         self,
         url_keys: list[str],
+        page_type: str = "blog",
         publish: bool = False,
         skip_existing: bool = True,
         dry_run: bool = False,
+        progress_callback=None,
     ) -> dict:
-        """Migrate specific blog posts by URL keys."""
-        return self.migrate_posts(url_keys, publish, skip_existing, dry_run)
+        """Migrate specific pages by URL keys."""
+        pages_to_migrate = []
+        for url_key in url_keys:
+            if page_type == "blog":
+                primary_url = f"{self.source_base_url}{self.blog_path}{url_key}"
+            else:
+                primary_url = f"{self.source_base_url}/{url_key}"
 
-    def migrate_posts(
+            pages_to_migrate.append({
+                "url_key": url_key,
+                "title": "",
+                "page_type": page_type,
+                "primary_url": primary_url,
+                "original_data": {"url_key": url_key},
+            })
+
+        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback)
+
+    def migrate_combined(
         self,
-        url_keys: list[str],
+        blog_excel_path: str = None,
+        static_excel_path: str = None,
         publish: bool = False,
         skip_existing: bool = True,
+        limit: int = 0,
         dry_run: bool = False,
+        progress_callback=None,
     ) -> dict:
-        """Core migration logic - process a list of blog URL keys."""
+        """
+        Migrate from both blog and static page Excel files in one run.
+        This is the single-button-click entry point.
+        """
+        self.mlog.info("__pipeline__", "", "init", "Starting combined migration pipeline")
+
+        pages_to_migrate = []
+
+        # Load blog posts
+        if blog_excel_path:
+            blog_posts = read_blog_list(blog_excel_path)
+            self.mlog.info("__pipeline__", "blog", "excel_read",
+                           f"Loaded {len(blog_posts)} published blog posts")
+            for post in blog_posts:
+                pages_to_migrate.append({
+                    "url_key": post["url_key"],
+                    "title": post.get("title", ""),
+                    "page_type": "blog",
+                    "primary_url": f"{self.source_base_url}{self.blog_path}{post['url_key']}",
+                    "original_data": post,
+                })
+
+        # Load static pages
+        if static_excel_path:
+            static_pages = read_static_page_list(static_excel_path)
+            self.mlog.info("__pipeline__", "static", "excel_read",
+                           f"Loaded {len(static_pages)} static pages")
+            for page in static_pages:
+                pages_to_migrate.append({
+                    "url_key": page["url_key"],
+                    "title": page.get("title", ""),
+                    "page_type": "static",
+                    "primary_url": page.get("primary_url", ""),
+                    "original_data": page,
+                })
+
+        if limit > 0:
+            pages_to_migrate = pages_to_migrate[:limit]
+
+        if not pages_to_migrate:
+            self.mlog.error("__pipeline__", "", "excel_read", "No pages found in either Excel file")
+            return self.results
+
+        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback)
+
+    def _run_migration(
+        self,
+        pages: list[dict],
+        publish: bool,
+        skip_existing: bool,
+        dry_run: bool,
+        progress_callback=None,
+    ) -> dict:
+        """Core migration loop - process a list of pages."""
         self.results["started_at"] = datetime.now().isoformat()
-        self.results["total"] = len(url_keys)
+        self.results["total"] = len(pages)
 
-        logger.info(f"Starting migration of {len(url_keys)} blog posts")
-        if dry_run:
-            logger.info("DRY RUN MODE - No content will be uploaded to Builder.io")
+        self.mlog.info("__pipeline__", "", "init",
+                       f"Starting migration of {len(pages)} pages (dry_run={dry_run})")
 
-        for i, url_key in enumerate(url_keys, 1):
-            logger.info(f"\n[{i}/{len(url_keys)}] Processing: {url_key}")
-            result = self._migrate_single_post(url_key, publish, skip_existing, dry_run)
+        for i, page_info in enumerate(pages, 1):
+            url_key = page_info["url_key"]
+            page_type = page_info["page_type"]
+            primary_url = page_info["primary_url"]
+
+            self.mlog.info(url_key, page_type, "init",
+                           f"[{i}/{len(pages)}] Processing: {page_info.get('title', url_key)}")
+
+            if progress_callback:
+                progress_callback(i, len(pages), url_key, "Processing...")
+
+            result = self._migrate_single_page(
+                url_key=url_key,
+                page_type=page_type,
+                primary_url=primary_url,
+                publish=publish,
+                skip_existing=skip_existing,
+                dry_run=dry_run,
+            )
+
+            # Attach original Excel data for export
+            result["original_data"] = page_info.get("original_data", {})
+            result["page_type"] = page_type
             self.results["details"].append(result)
 
-            if result["status"] == "success":
+            if result["status"] == STATUS_PUBLISHED:
                 self.results["success"] += 1
-            elif result["status"] == "skipped":
+            elif result["status"] == STATUS_SKIPPED:
                 self.results["skipped"] += 1
+            elif result["status"] == STATUS_NEEDS_REVIEW:
+                self.results["needs_review"] += 1
             else:
                 self.results["failed"] += 1
 
-            # Rate limit between posts
-            if i < len(url_keys):
-                time.sleep(1)
+            if progress_callback:
+                progress_callback(i, len(pages), url_key, result["status"])
+
+            # Rate limit between pages
+            if i < len(pages):
+                time.sleep(0.5)
 
         self.results["completed_at"] = datetime.now().isoformat()
-        self._print_summary()
+        self.mlog.info("__pipeline__", "", "complete", "Migration complete", {
+            "total": self.results["total"],
+            "success": self.results["success"],
+            "failed": self.results["failed"],
+            "skipped": self.results["skipped"],
+            "needs_review": self.results["needs_review"],
+        })
+
         return self.results
 
-    def _migrate_single_post(
-        self, url_key: str, publish: bool, skip_existing: bool, dry_run: bool
+    def _migrate_single_page(
+        self, url_key: str, page_type: str, primary_url: str,
+        publish: bool, skip_existing: bool, dry_run: bool,
     ) -> dict:
-        """Migrate a single blog post."""
-        result = {"url_key": url_key, "status": "pending", "error": None}
+        """Migrate a single page through the full pipeline."""
+        result = {
+            "url_key": url_key,
+            "page_type": page_type,
+            "status": STATUS_PENDING,
+            "title": "",
+            "error": None,
+            "source": "",
+            "images_processed": 0,
+            "builder_id": "",
+            "confidence": "high",
+        }
 
         try:
-            # Check if already exists
+            # Step 1: Check if already exists
             if skip_existing and not dry_run:
-                if self.builder.check_entry_exists(url_key):
-                    logger.info(f"  Skipping (already exists): {url_key}")
-                    result["status"] = "skipped"
+                model = "blog-post" if page_type == "blog" else "page"
+                if self.builder.check_entry_exists(url_key, model_override=model):
+                    self.mlog.info(url_key, page_type, "upload",
+                                   "Skipping - already exists in Builder.io")
+                    result["status"] = STATUS_SKIPPED
                     return result
 
-            # Step 1: Scrape the blog post
-            logger.info(f"  Scraping content...")
-            post_data = self.scraper.fetch_post_by_url_key(url_key)
+            # Step 2: Scrape the page
+            self.mlog.info(url_key, page_type, "scrape", "Scraping content...")
+            page_data = self._scrape_page(url_key, page_type, primary_url)
 
-            if post_data.get("error"):
-                result["status"] = "failed"
-                result["error"] = post_data["error"]
+            if page_data.get("error"):
+                self.mlog.error(url_key, page_type, "scrape",
+                                f"Scraping failed: {page_data['error']}")
+                result["status"] = STATUS_FAILED
+                result["error"] = page_data["error"]
                 return result
 
-            if not post_data.get("html_content"):
-                result["status"] = "failed"
+            if not page_data.get("html_content"):
+                self.mlog.warning(url_key, page_type, "scrape",
+                                  "No content found - flagging for human review")
+                result["status"] = STATUS_NEEDS_REVIEW
                 result["error"] = "No content found"
+                result["confidence"] = "low"
                 return result
 
-            result["title"] = post_data.get("title", "")
-            result["source"] = post_data.get("source", "")
+            result["title"] = page_data.get("title", "")
+            result["source"] = page_data.get("source", "")
+            result["meta_title"] = page_data.get("meta_title", "")
+            result["meta_description"] = page_data.get("meta_description", "")
 
-            # Step 2: Process images (download + upload to Builder.io)
+            self.mlog.info(url_key, page_type, "scrape",
+                           f"Scraped: {result['title']} (source: {result['source']})",
+                           {"content_length": len(page_data.get("html_content", "")),
+                            "images_found": len(page_data.get("images", []))})
+
+            # Step 3: Assess confidence
+            confidence = self._assess_confidence(page_data)
+            result["confidence"] = confidence
+
+            if confidence == "low":
+                self.mlog.warning(url_key, page_type, "transform",
+                                  "Low confidence in content fidelity - flagging for human review",
+                                  {"reason": "Content may not match the live page layout"})
+                result["status"] = STATUS_NEEDS_REVIEW
+                # Still continue to upload as draft so human can review in Builder.io
+
+            # Step 4: Process images
             if not dry_run:
-                logger.info(f"  Processing images...")
-                updated_html, image_mappings = self.image_handler.process_images_in_html(
-                    post_data["html_content"],
-                    base_url=self.source_base_url,
-                )
-                post_data["html_content"] = updated_html
-                result["images_processed"] = len(image_mappings)
+                self.mlog.info(url_key, page_type, "images", "Processing images...")
+                try:
+                    updated_html, image_mappings = self.image_handler.process_images_in_html(
+                        page_data["html_content"],
+                        base_url=self.source_base_url,
+                    )
+                    page_data["html_content"] = updated_html
+                    result["images_processed"] = len(image_mappings)
+                    self.mlog.info(url_key, page_type, "images",
+                                   f"Processed {len(image_mappings)} images")
+                except Exception as e:
+                    self.mlog.warning(url_key, page_type, "images",
+                                     f"Image processing error (continuing): {e}")
 
                 # Process thumbnail
-                if post_data.get("thumbnail"):
-                    builder_thumbnail = self.image_handler.process_thumbnail(
-                        post_data["thumbnail"]
-                    )
-                    if builder_thumbnail:
-                        post_data["thumbnail"] = builder_thumbnail
+                if page_data.get("thumbnail"):
+                    try:
+                        builder_thumbnail = self.image_handler.process_thumbnail(
+                            page_data["thumbnail"]
+                        )
+                        if builder_thumbnail:
+                            page_data["thumbnail"] = builder_thumbnail
+                    except Exception as e:
+                        self.mlog.warning(url_key, page_type, "images",
+                                         f"Thumbnail processing error: {e}")
 
-            # Step 3: Create entry in Builder.io
+            # Step 5: Upload to Builder.io
             if dry_run:
-                logger.info(f"  [DRY RUN] Would create: {post_data.get('title', url_key)}")
-                result["status"] = "success"
+                self.mlog.info(url_key, page_type, "upload",
+                               f"[DRY RUN] Would create: {page_data.get('title', url_key)}")
+                if result["status"] == STATUS_PENDING:
+                    result["status"] = STATUS_PUBLISHED
                 result["dry_run"] = True
             else:
-                logger.info(f"  Creating Builder.io entry...")
-                api_result = self.builder.create_blog_entry(post_data, publish=publish)
+                self.mlog.info(url_key, page_type, "upload", "Creating Builder.io entry...")
+
+                # If low confidence, always save as draft for human review
+                should_publish = publish and confidence != "low"
+
+                api_result = self.builder.create_entry(
+                    page_data, page_type=page_type, publish=should_publish
+                )
 
                 if api_result.get("success"):
-                    result["status"] = "success"
                     result["builder_id"] = api_result.get("data", {}).get("id", "")
-                    logger.info(f"  Successfully migrated: {post_data.get('title', url_key)}")
+
+                    if result["status"] != STATUS_NEEDS_REVIEW:
+                        result["status"] = STATUS_PUBLISHED
+
+                    self.mlog.info(url_key, page_type, "upload",
+                                   f"Successfully uploaded: {page_data.get('title', url_key)}",
+                                   {"builder_id": result["builder_id"],
+                                    "published": should_publish})
                 else:
-                    result["status"] = "failed"
+                    result["status"] = STATUS_FAILED
                     result["error"] = api_result.get("error", "Unknown error")
-                    logger.error(f"  Failed: {result['error']}")
+                    self.mlog.error(url_key, page_type, "upload",
+                                    f"Upload failed: {result['error']}",
+                                    {"details": api_result.get("details", "")})
 
         except Exception as e:
-            result["status"] = "failed"
+            result["status"] = STATUS_FAILED
             result["error"] = str(e)
-            logger.error(f"  Exception: {e}")
+            self.mlog.error(url_key, page_type, "error", f"Exception: {e}")
 
         return result
 
-    def _print_summary(self):
-        """Print migration summary."""
-        r = self.results
-        logger.info("\n" + "=" * 60)
-        logger.info("MIGRATION SUMMARY")
-        logger.info("=" * 60)
-        logger.info(f"Total:    {r['total']}")
-        logger.info(f"Success:  {r['success']}")
-        logger.info(f"Failed:   {r['failed']}")
-        logger.info(f"Skipped:  {r['skipped']}")
-        logger.info(f"Started:  {r['started_at']}")
-        logger.info(f"Finished: {r['completed_at']}")
-        logger.info("=" * 60)
+    def _scrape_page(self, url_key: str, page_type: str, primary_url: str) -> dict:
+        """Scrape a page using the appropriate scraper."""
+        if page_type == "blog":
+            return self.blog_scraper.fetch_post_by_url_key(url_key)
+        else:
+            return self.static_scraper.fetch_page_by_url(primary_url, url_key)
 
-        if r["failed"] > 0:
-            logger.info("\nFailed posts:")
-            for d in r["details"]:
-                if d["status"] == "failed":
-                    logger.info(f"  - {d['url_key']}: {d.get('error', 'Unknown')}")
+    def _assess_confidence(self, page_data: dict) -> str:
+        """
+        Assess confidence that the scraped content faithfully represents the live page.
+
+        Returns: 'high', 'medium', or 'low'
+        """
+        html = page_data.get("html_content", "")
+        title = page_data.get("title", "")
+        source = page_data.get("source", "")
+
+        # No content at all
+        if not html or len(html) < 100:
+            return "low"
+
+        # No title found
+        if not title:
+            return "low"
+
+        # GraphQL/CMS API source is more reliable than HTML scraping
+        if source in ("graphql", "cms_graphql"):
+            return "high"
+
+        # HTML scraping - check content quality
+        content_length = len(html)
+
+        # Very short content might be an error page
+        if content_length < 500:
+            return "low"
+
+        # Moderate content
+        if content_length < 2000:
+            return "medium"
+
+        return "high"
 
     def save_results(self, output_path: str = "migration_results.json"):
         """Save migration results to a JSON file."""
@@ -225,4 +501,16 @@ class MigrationAgent:
         path = Path("output") / output_path
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.results, f, indent=2, ensure_ascii=False)
-        logger.info(f"Results saved to {path}")
+        self.mlog.info("__pipeline__", "", "export", f"Results saved to {path}")
+
+    def get_log_entries(self, page_key: str = None) -> list[dict]:
+        """Get log entries, optionally filtered by page_key."""
+        return self.mlog.get_entries(page_key=page_key)
+
+    def get_log_summary(self) -> dict:
+        """Get a summary of the migration log."""
+        return self.mlog.get_summary()
+
+    def export_log(self, output_path: str = None) -> str:
+        """Export the full log."""
+        return self.mlog.export_log(output_path)
