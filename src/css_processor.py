@@ -15,7 +15,9 @@ elements that break Builder.io's Custom Code block rendering.
 """
 
 import re
+import logging
 from bs4 import BeautifulSoup, Comment
+from premailer import Premailer
 
 
 # Base CSS that replicates Magento Page Builder layout behavior
@@ -174,13 +176,39 @@ def sanitize_html(html_content: str) -> str:
     return str(soup)
 
 
+def _inline_css(html_with_styles: str) -> str:
+    """
+    Convert <style> blocks to inline style= attributes using premailer.
+
+    Builder.io's Custom Code block renders <style> tags as raw text in the
+    editor. By inlining all CSS, we avoid this problem entirely.
+    """
+    try:
+        pm = Premailer(
+            html_with_styles,
+            remove_classes=False,
+            strip_important=False,
+            keep_style_tags=False,      # Remove <style> after inlining
+            include_star_selectors=True,
+            cssutils_logging_level=logging.CRITICAL,  # Suppress CSS parse warnings
+        )
+        return pm.transform()
+    except Exception:
+        # If premailer fails (malformed CSS), strip <style> tags manually
+        # and return just the HTML content — better than showing raw CSS
+        soup = BeautifulSoup(html_with_styles, "html.parser")
+        for style_tag in soup.find_all("style"):
+            style_tag.decompose()
+        return str(soup)
+
+
 def process_html_for_builder(html_content: str) -> str:
     """
     Process scraped HTML so it renders correctly in Builder.io.
 
     1. Sanitize: remove scripts, nav, footer, and other non-content elements
     2. Rewrite: fix #html-body CSS selectors
-    3. Style: add base Page Builder layout CSS
+    3. Inline: convert all <style> rules to inline style= attributes
     4. Wrap: in a styled container div
     """
     if not html_content:
@@ -191,23 +219,14 @@ def process_html_for_builder(html_content: str) -> str:
 
     soup = BeautifulSoup(html_content, "html.parser")
 
-    # Step 2: Extract and fix existing <style> blocks
-    existing_styles = []
+    # Step 2: Fix existing <style> blocks — rewrite Magento #html-body selectors
     for style_tag in soup.find_all("style"):
         css_text = style_tag.string or ""
-        # Remove #html-body prefix so selectors work without Magento's body ID
         fixed_css = re.sub(r'#html-body\s+', '', css_text)
-        existing_styles.append(fixed_css)
-        style_tag.decompose()
+        style_tag.string = fixed_css
 
-    # Step 3: Build the combined CSS
-    combined_css = PAGEBUILDER_BASE_CSS + "\n" + "\n".join(existing_styles)
-
-    # Step 4: Build the final HTML with styles included
-    body_html = str(soup)
-
-    styled_html = f"""<div class="migrated-blog-content">
-<style>
+    # Step 3: Build a full HTML document with base styles + content for inlining
+    base_styles = f"""<style>
 .migrated-blog-content {{
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
                  "Helvetica Neue", Arial, "Noto Sans TC", "PingFang HK", sans-serif;
@@ -221,9 +240,26 @@ def process_html_for_builder(html_content: str) -> str:
     max-width: 100%;
     height: auto;
 }}
-{combined_css}
-</style>
+{PAGEBUILDER_BASE_CSS}
+</style>"""
+
+    body_html = str(soup)
+    full_html = f"""<div class="migrated-blog-content">
+{base_styles}
 {body_html}
 </div>"""
 
-    return styled_html
+    # Step 4: Inline all CSS — converts <style> rules to style= attributes
+    # This is critical because Builder.io Custom Code blocks render <style>
+    # tags as visible raw text instead of applying them
+    inlined = _inline_css(full_html)
+
+    # Clean up any premailer artifacts (it may add <html><body> wrappers)
+    inlined_soup = BeautifulSoup(inlined, "html.parser")
+    # Find our migrated-blog-content div
+    content_div = inlined_soup.find("div", class_="migrated-blog-content")
+    if content_div:
+        return str(content_div)
+
+    # Fallback: return the full inlined result
+    return str(inlined_soup)
