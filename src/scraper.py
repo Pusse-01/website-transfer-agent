@@ -57,7 +57,11 @@ class BlogScraper:
                     list_thumbnail
                     published_at
                     categories
-                    tags
+                    tags {
+                        name
+                        url_key
+                        tag_id
+                    }
                     tag_ids
                 }
             }
@@ -94,7 +98,7 @@ class BlogScraper:
         retries with fewer fields if the API rejects unknown ones.
         """
         queries = [
-            # Attempt 1: tags/categories as scalar fields
+            # Attempt 1: full fields with tags as object type (AmBlogTags)
             """
             query GetBlogPost($urlKey: String!) {
                 amBlogPost(urlKey: $urlKey) {
@@ -110,7 +114,11 @@ class BlogScraper:
                     meta_description
                     meta_tags
                     categories
-                    tags
+                    tags {
+                        name
+                        url_key
+                        tag_id
+                    }
                     tag_ids
                     url_key
                     published_at
@@ -123,7 +131,7 @@ class BlogScraper:
                 }
             }
             """,
-            # Attempt 2: minimal safe fields only
+            # Attempt 2: minimal safe fields (no tags/categories)
             """
             query GetBlogPost($urlKey: String!) {
                 amBlogPost(urlKey: $urlKey) {

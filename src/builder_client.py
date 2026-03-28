@@ -29,10 +29,13 @@ class BuilderClient:
     """Client for Builder.io Content API to create and manage content entries."""
 
     BASE_URL = "https://builder.io/api/v1/write"
+    CDN_BASE_URL = "https://cdn.builder.io/api/v3/content"
 
     def __init__(self, api_key: str, model_name: str = "blog-post"):
         self.api_key = api_key
         self.model_name = model_name
+        # Private keys start with "bpk-"; public keys don't
+        self._is_private_key = api_key.startswith("bpk-")
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {api_key}",
@@ -40,6 +43,21 @@ class BuilderClient:
         })
         self._request_count = 0
         self._last_request_time = 0.0
+
+    def _cdn_url(self, model: str, extra_params: str = "") -> str:
+        """Build a CDN read URL.
+
+        Private keys authenticate via the Authorization header (already on
+        the session), so we omit the apiKey query param.  Public keys must
+        be passed as a query param because they don't use Bearer auth.
+        """
+        if self._is_private_key:
+            # Auth goes through the header — no apiKey in URL
+            url = f"{self.CDN_BASE_URL}/{model}?{extra_params}" if extra_params else f"{self.CDN_BASE_URL}/{model}"
+        else:
+            sep = "&" if extra_params else ""
+            url = f"{self.CDN_BASE_URL}/{model}?apiKey={self.api_key}{sep}{extra_params}"
+        return url
 
     def create_blog_entry(self, blog_data: dict, publish: bool = False) -> dict:
         """
@@ -362,14 +380,8 @@ class BuilderClient:
         model = model_override or self.model_name
         self._rate_limit(READ_DELAY_SECONDS)
 
-        params = (
-            f"apiKey={self.api_key}"
-            f"&limit={limit}"
-            f"&includeUnpublished=true"
-            f"&query.published.$ne=published"
-        )
-
-        url = f"https://cdn.builder.io/api/v3/content/{model}?{params}"
+        params = f"limit={limit}&includeUnpublished=true&query.published.$ne=published"
+        url = self._cdn_url(model, params)
         try:
             response = self.session.get(url, timeout=15)
             response.raise_for_status()
@@ -438,13 +450,8 @@ class BuilderClient:
         model = model_override or self.model_name
         self._rate_limit(READ_DELAY_SECONDS)
 
-        check_url = (
-            f"https://cdn.builder.io/api/v3/content/{model}"
-            f"?apiKey={self.api_key}"
-            f"&query.data.slug={url_key}"
-            f"&limit=1"
-            f"&fields=id,name"
-        )
+        params = f"query.data.slug={url_key}&limit=1&fields=id,name&includeUnpublished=true"
+        check_url = self._cdn_url(model, params)
         try:
             response = self.session.get(check_url, timeout=15)
             response.raise_for_status()
@@ -460,13 +467,8 @@ class BuilderClient:
         model = model_override or self.model_name
         self._rate_limit(READ_DELAY_SECONDS)
 
-        url = (
-            f"https://cdn.builder.io/api/v3/content/{model}"
-            f"?apiKey={self.api_key}"
-            f"&limit={limit}"
-            f"&offset={offset}"
-            f"&fields=id,name,data.slug,data.title,published"
-        )
+        params = f"limit={limit}&offset={offset}&fields=id,name,data.slug,data.title,published"
+        url = self._cdn_url(model, params)
         try:
             response = self.session.get(url, timeout=15)
             response.raise_for_status()
@@ -481,13 +483,13 @@ class BuilderClient:
         model = model_override or self.model_name
         self._rate_limit(READ_DELAY_SECONDS)
 
-        params = f"apiKey={self.api_key}&limit=1"
+        params = "limit=1"
         if slug:
             params += f"&query.data.slug={slug}"
         if include_unpublished:
             params += "&includeUnpublished=true"
 
-        url = f"https://cdn.builder.io/api/v3/content/{model}?{params}"
+        url = self._cdn_url(model, params)
         try:
             response = self.session.get(url, timeout=15)
             response.raise_for_status()
@@ -503,11 +505,11 @@ class BuilderClient:
         model = model_override or self.model_name
         self._rate_limit(READ_DELAY_SECONDS)
 
-        params = f"apiKey={self.api_key}&limit={limit}"
+        params = f"limit={limit}"
         if include_unpublished:
             params += "&includeUnpublished=true"
 
-        url = f"https://cdn.builder.io/api/v3/content/{model}?{params}"
+        url = self._cdn_url(model, params)
         try:
             response = self.session.get(url, timeout=15)
             response.raise_for_status()
