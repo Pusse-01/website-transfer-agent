@@ -15,6 +15,7 @@ elements that break Builder.io's Custom Code block rendering.
 """
 
 import re
+import html
 import logging
 from bs4 import BeautifulSoup, Comment
 from premailer import Premailer
@@ -141,6 +142,33 @@ UNWANTED_SELECTORS = [
 ]
 
 
+def _unescape_pagebuilder_html(html_content: str) -> str:
+    """
+    Unescape HTML entities inside Magento Page Builder HTML blocks.
+
+    Magento's Page Builder stores custom HTML/CSS/JS inside
+    data-content-type="html" blocks with escaped entities, e.g.:
+        &lt;style&gt; .pgl-block { ... } &lt;/style&gt;
+        &lt;script&gt; ... &lt;/script&gt;
+
+    When fetched via GraphQL, these stay escaped. BeautifulSoup sees them
+    as plain text, so sanitize_html can't find or remove the <script>/<style>
+    tags. We must unescape them first so they become real HTML elements.
+    """
+    soup = BeautifulSoup(html_content, "html.parser")
+
+    # Find all Magento Page Builder HTML blocks
+    for el in soup.find_all(attrs={"data-content-type": "html"}):
+        raw_text = el.decode_contents()
+        # Check if it contains escaped HTML tags
+        if "&lt;" in raw_text and "&gt;" in raw_text:
+            unescaped = html.unescape(raw_text)
+            el.clear()
+            el.append(BeautifulSoup(unescaped, "html.parser"))
+
+    return str(soup)
+
+
 def sanitize_html(html_content: str) -> str:
     """
     Remove scripts, navigation, and other non-content elements from HTML.
@@ -150,6 +178,10 @@ def sanitize_html(html_content: str) -> str:
     """
     if not html_content:
         return html_content
+
+    # Step 0: Unescape Magento Page Builder HTML blocks so that escaped
+    # <script>/<style> tags become real elements that we can detect and remove
+    html_content = _unescape_pagebuilder_html(html_content)
 
     soup = BeautifulSoup(html_content, "html.parser")
 
@@ -170,7 +202,7 @@ def sanitize_html(html_content: str) -> str:
     for div in soup.find_all("div"):
         if not div.get_text(strip=True) and not div.find("img") and not div.find("svg"):
             # Check if it has meaningful attributes (like data-content-type)
-            if not any(attr.startswith("data-") for attr in div.attrs):
+            if not any(attr.startswith("data-") for attr in (div.attrs or {})):
                 div.decompose()
 
     return str(soup)
@@ -256,6 +288,13 @@ def process_html_for_builder(html_content: str) -> str:
 
     # Clean up any premailer artifacts (it may add <html><body> wrappers)
     inlined_soup = BeautifulSoup(inlined, "html.parser")
+
+    # Final safety: remove any <style> or <script> tags that survived
+    # (premailer may leave behind rules it couldn't inline, e.g. @media queries)
+    for tag_name in ("style", "script", "noscript"):
+        for tag in inlined_soup.find_all(tag_name):
+            tag.decompose()
+
     # Find our migrated-blog-content div
     content_div = inlined_soup.find("div", class_="migrated-blog-content")
     if content_div:
