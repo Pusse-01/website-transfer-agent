@@ -34,6 +34,7 @@ from src.image_handler import ImageHandler
 from src.excel_reader import read_blog_list, read_static_page_list, detect_excel_type
 from src.excel_writer import export_blog_results
 from src.migration_agent import MigrationAgent
+from src.state_persistence import save_run, load_run, load_latest_run, list_runs
 
 load_dotenv()
 
@@ -61,11 +62,25 @@ DEFAULTS = {
     "excel_type": None,
     "pipeline_running": False,
     "pipeline_log": [],
+    "current_run_id": None,
 }
 
 for key, default in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+# ---------------------------------------------------------------------------
+# Auto-load last run from disk on first page load
+# ---------------------------------------------------------------------------
+if not st.session_state.get("_state_loaded"):
+    latest = load_latest_run()
+    if latest and latest.get("migration_results"):
+        st.session_state.migration_results = latest["migration_results"]
+        st.session_state.pipeline_log = latest.get("pipeline_log", [])
+        st.session_state.current_run_id = latest["run_id"]
+        st.session_state["results_excel_path"] = latest.get("results_excel_path", "")
+        st.session_state["log_file_path"] = latest.get("log_file_path", "")
+    st.session_state["_state_loaded"] = True
 
 # ---------------------------------------------------------------------------
 # Sidebar - Configuration
@@ -584,6 +599,7 @@ with tab_pipeline:
             st.session_state.pipeline_running = False
 
             # Export results to Excel
+            excel_path = ""
             try:
                 excel_path = export_blog_results(agent.results)
                 if excel_path:
@@ -593,11 +609,26 @@ with tab_pipeline:
                 st.error(f"Failed to export Excel: {e}")
 
             # Export log
+            log_path = ""
             try:
                 log_path = agent.export_log()
                 st.session_state["log_file_path"] = log_path
             except Exception:
                 pass
+
+            # Persist to disk so data survives page refresh
+            run_id = agent.mlog.run_id
+            try:
+                save_run(
+                    run_id=run_id,
+                    migration_results=agent.results,
+                    pipeline_log=agent.get_log_entries(),
+                    results_excel_path=excel_path or "",
+                    log_file_path=log_path or "",
+                )
+                st.session_state.current_run_id = run_id
+            except Exception as e:
+                st.error(f"Failed to persist run state: {e}")
 
             st.rerun()
 
@@ -789,10 +820,60 @@ with tab_builder:
 with tab_results:
     st.subheader("Migration Results & Export")
 
+    # -------------------------------------------------------------------
+    # Past Runs browser
+    # -------------------------------------------------------------------
+    past_runs = list_runs()
+    if past_runs:
+        with st.expander(f"Past Runs ({len(past_runs)} saved)", expanded=False):
+            run_table = []
+            for run in past_runs:
+                run_table.append({
+                    "Run ID": run.get("run_id", ""),
+                    "Started": (run.get("started_at", "") or "")[:19],
+                    "Total": run.get("total", 0),
+                    "Published": run.get("success", 0),
+                    "Failed": run.get("failed", 0),
+                    "Review": run.get("needs_review", 0),
+                })
+            st.dataframe(run_table, use_container_width=True)
+
+            run_ids = [r["run_id"] for r in past_runs]
+            current_idx = 0
+            if st.session_state.current_run_id in run_ids:
+                current_idx = run_ids.index(st.session_state.current_run_id)
+
+            selected_run_id = st.selectbox(
+                "Select a run to load",
+                run_ids,
+                index=current_idx,
+                format_func=lambda rid: f"{rid} ({next((r.get('total',0) for r in past_runs if r['run_id']==rid), '?')} pages)",
+                key="past_run_select",
+            )
+
+            if st.button("Load Selected Run", use_container_width=True):
+                loaded = load_run(selected_run_id)
+                if loaded and loaded.get("migration_results"):
+                    st.session_state.migration_results = loaded["migration_results"]
+                    st.session_state.pipeline_log = loaded.get("pipeline_log", [])
+                    st.session_state.current_run_id = selected_run_id
+                    st.session_state["results_excel_path"] = loaded.get("results_excel_path", "")
+                    st.session_state["log_file_path"] = loaded.get("log_file_path", "")
+                    st.success(f"Loaded run: {selected_run_id}")
+                    st.rerun()
+                else:
+                    st.error("Failed to load run data.")
+
+    # -------------------------------------------------------------------
+    # Current results display
+    # -------------------------------------------------------------------
     if not st.session_state.migration_results:
-        st.info("No migration results yet. Run the pipeline first.")
+        st.info("No migration results yet. Run the pipeline first, or load a past run above.")
     else:
         r = st.session_state.migration_results
+
+        if st.session_state.current_run_id:
+            st.caption(f"Run ID: `{st.session_state.current_run_id}`")
 
         # Summary metrics
         cols = st.columns(5)
@@ -830,7 +911,6 @@ with tab_results:
         col_excel, col_json, col_log = st.columns(3)
 
         with col_excel:
-            # Excel export
             excel_path = st.session_state.get("results_excel_path", "")
             if excel_path and Path(excel_path).exists():
                 with open(excel_path, "rb") as f:
@@ -842,11 +922,19 @@ with tab_results:
                         use_container_width=True,
                     )
             else:
-                # Generate on-the-fly
                 if st.button("Generate Excel Report", use_container_width=True):
                     try:
                         path = export_blog_results(r)
                         st.session_state["results_excel_path"] = path
+                        # Also update saved run if we have one
+                        if st.session_state.current_run_id:
+                            save_run(
+                                run_id=st.session_state.current_run_id,
+                                migration_results=r,
+                                pipeline_log=st.session_state.pipeline_log,
+                                results_excel_path=path,
+                                log_file_path=st.session_state.get("log_file_path", ""),
+                            )
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to generate Excel: {e}")
@@ -877,20 +965,62 @@ with tab_results:
 with tab_logs:
     st.subheader("Migration Logs")
 
-    if not st.session_state.pipeline_log:
-        st.info("No logs yet. Run the migration pipeline to generate logs.")
-    else:
-        logs = st.session_state.pipeline_log
+    logs = st.session_state.pipeline_log
+
+    # If no logs in session but we have a log file on disk, offer to load it
+    if not logs:
+        log_file = st.session_state.get("log_file_path", "")
+        if log_file and Path(log_file).exists():
+            st.info("Logs available on disk from a previous run.")
+            if st.button("Load logs from disk"):
+                try:
+                    with open(log_file, "r", encoding="utf-8") as f:
+                        st.session_state.pipeline_log = json.load(f)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to load logs: {e}")
+
+        # Also check for any JSONL log files in the logs/ directory
+        logs_dir = Path("logs")
+        if logs_dir.exists():
+            jsonl_files = sorted(logs_dir.glob("migration_*.jsonl"), reverse=True)
+            if jsonl_files:
+                st.markdown("**Or load from a log file:**")
+                selected_log = st.selectbox(
+                    "Available log files",
+                    jsonl_files,
+                    format_func=lambda p: p.name,
+                    key="log_file_select",
+                )
+                if st.button("Load selected log file"):
+                    try:
+                        entries = []
+                        with open(selected_log, "r", encoding="utf-8") as f:
+                            for line in f:
+                                line = line.strip()
+                                if line:
+                                    entries.append(json.loads(line))
+                        st.session_state.pipeline_log = entries
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to parse log file: {e}")
+
+        if not logs:
+            st.info("No logs loaded. Run the migration pipeline or load a past run from the Results tab.")
+
+    if logs:
+        if st.session_state.current_run_id:
+            st.caption(f"Viewing logs for run: `{st.session_state.current_run_id}`")
 
         # Filter controls
         col_filter_key, col_filter_step, col_filter_level = st.columns(3)
 
         with col_filter_key:
-            all_keys = list(dict.fromkeys(e["page_key"] for e in logs))
+            all_keys = list(dict.fromkeys(e.get("page_key", "") for e in logs))
             filter_key = st.selectbox("Filter by page key", ["All"] + all_keys, key="log_filter_key")
 
         with col_filter_step:
-            all_steps = list(dict.fromkeys(e["step"] for e in logs))
+            all_steps = list(dict.fromkeys(e.get("step", "") for e in logs))
             filter_step = st.selectbox("Filter by step", ["All"] + all_steps, key="log_filter_step")
 
         with col_filter_level:
@@ -900,18 +1030,17 @@ with tab_logs:
         # Apply filters
         filtered = logs
         if filter_key != "All":
-            filtered = [e for e in filtered if e["page_key"] == filter_key]
+            filtered = [e for e in filtered if e.get("page_key") == filter_key]
         if filter_step != "All":
-            filtered = [e for e in filtered if e["step"] == filter_step]
+            filtered = [e for e in filtered if e.get("step") == filter_step]
         if filter_level != "All":
-            filtered = [e for e in filtered if e["level"] == filter_level]
+            filtered = [e for e in filtered if e.get("level") == filter_level]
 
         st.caption(f"Showing {len(filtered)} of {len(logs)} log entries")
 
         # Display logs
-        for entry in filtered[-100:]:  # Show last 100
+        for entry in filtered[-200:]:
             level = entry.get("level", "INFO")
-            icon = {"ERROR": "!!!", "WARNING": "!", "INFO": "", "DEBUG": ""}.get(level, "")
             timestamp = entry.get("timestamp", "")[:19]
             page_key = entry.get("page_key", "")
             step = entry.get("step", "")
@@ -931,4 +1060,6 @@ with tab_logs:
             st.session_state[key] = DEFAULTS[key]
         st.session_state.pop("results_excel_path", None)
         st.session_state.pop("log_file_path", None)
+        st.session_state.pop("_state_loaded", None)
+        st.session_state.pop("current_run_id", None)
         st.rerun()
