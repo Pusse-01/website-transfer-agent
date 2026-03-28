@@ -290,6 +290,149 @@ class BuilderClient:
         from datetime import datetime, timezone
         return datetime.now(timezone.utc).isoformat()
 
+    def publish_entry(self, entry_id: str, model_override: str = None) -> dict:
+        """
+        Publish a single draft entry by its Builder.io ID.
+
+        Uses the Write API: PUT /api/v1/write/<model>/<id>
+        """
+        model = model_override or self.model_name
+        url = f"{self.BASE_URL}/{model}/{entry_id}"
+
+        self._rate_limit(WRITE_DELAY_SECONDS)
+
+        try:
+            response = self.session.put(
+                url,
+                json={"published": "published"},
+                timeout=60,
+            )
+
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", 10))
+                logger.warning(f"Rate limited, waiting {retry_after}s...")
+                time.sleep(retry_after)
+                response = self.session.put(
+                    url,
+                    json={"published": "published"},
+                    timeout=60,
+                )
+
+            response.raise_for_status()
+            result = response.json()
+            logger.info(f"Published entry {entry_id} (model: {model})")
+            return {"success": True, "data": result}
+
+        except requests.exceptions.HTTPError as e:
+            error_body = ""
+            try:
+                error_body = e.response.text
+            except Exception:
+                pass
+            logger.error(f"Failed to publish entry {entry_id}: {e} - {error_body}")
+            return {"success": False, "error": str(e), "details": error_body}
+
+        except Exception as e:
+            logger.error(f"Failed to publish entry {entry_id}: {e}")
+            return {"success": False, "error": str(e)}
+
+    def unpublish_entry(self, entry_id: str, model_override: str = None) -> dict:
+        """Unpublish (set to draft) a single entry by its Builder.io ID."""
+        model = model_override or self.model_name
+        url = f"{self.BASE_URL}/{model}/{entry_id}"
+
+        self._rate_limit(WRITE_DELAY_SECONDS)
+
+        try:
+            response = self.session.put(
+                url,
+                json={"published": "draft"},
+                timeout=60,
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info(f"Unpublished entry {entry_id} (model: {model})")
+            return {"success": True, "data": result}
+        except Exception as e:
+            logger.error(f"Failed to unpublish entry {entry_id}: {e}")
+            return {"success": False, "error": str(e)}
+
+    def fetch_draft_entries(self, limit: int = 100, model_override: str = None) -> list[dict]:
+        """Fetch all draft (unpublished) entries."""
+        model = model_override or self.model_name
+        self._rate_limit(READ_DELAY_SECONDS)
+
+        params = (
+            f"apiKey={self.api_key}"
+            f"&limit={limit}"
+            f"&includeUnpublished=true"
+            f"&query.published.$ne=published"
+        )
+
+        url = f"https://cdn.builder.io/api/v3/content/{model}?{params}"
+        try:
+            response = self.session.get(url, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            results = data.get("results", [])
+            # Filter to drafts only (API may not perfectly filter)
+            drafts = [e for e in results if e.get("published") != "published"]
+            return drafts
+        except Exception as e:
+            logger.error(f"Failed to fetch draft entries: {e}")
+            return []
+
+    def publish_all_drafts(self, model_override: str = None, progress_callback=None) -> dict:
+        """
+        Publish all draft entries for a given model.
+
+        Args:
+            model_override: Model name (defaults to self.model_name)
+            progress_callback: Optional fn(current, total, entry_name)
+
+        Returns:
+            Dict with 'total', 'published', 'failed', 'details'
+        """
+        model = model_override or self.model_name
+        drafts = self.fetch_draft_entries(limit=200, model_override=model)
+
+        results = {
+            "total": len(drafts),
+            "published": 0,
+            "failed": 0,
+            "details": [],
+        }
+
+        logger.info(f"Found {len(drafts)} draft entries in model '{model}'")
+
+        for i, entry in enumerate(drafts, 1):
+            entry_id = entry.get("id", "")
+            entry_name = entry.get("name", "Untitled")
+            slug = entry.get("data", {}).get("slug", "")
+
+            if progress_callback:
+                progress_callback(i, len(drafts), entry_name)
+
+            pub_result = self.publish_entry(entry_id, model_override=model)
+
+            detail = {
+                "id": entry_id,
+                "name": entry_name,
+                "slug": slug,
+                "success": pub_result.get("success", False),
+                "error": pub_result.get("error", ""),
+            }
+            results["details"].append(detail)
+
+            if pub_result.get("success"):
+                results["published"] += 1
+                logger.info(f"  [{i}/{len(drafts)}] Published: {entry_name}")
+            else:
+                results["failed"] += 1
+                logger.error(f"  [{i}/{len(drafts)}] Failed: {entry_name} - {pub_result.get('error', '')}")
+
+        return results
+
     def check_entry_exists(self, url_key: str, model_override: str = None) -> bool:
         """Check if an entry with this URL key already exists."""
         model = model_override or self.model_name

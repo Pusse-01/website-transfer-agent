@@ -698,6 +698,92 @@ with tab_builder:
             with st.expander("Raw Entry JSON"):
                 st.json(selected_entry)
 
+        # -------------------------------------------------------------------
+        # Publish All Drafts section
+        # -------------------------------------------------------------------
+        st.divider()
+        st.markdown("### Publish Drafts")
+
+        if not builder_private_key or builder_private_key == "your_builder_private_api_key_here":
+            st.warning("Enter your Builder.io **Private API Key** in the sidebar to enable publishing.")
+        else:
+            pub_model = st.radio(
+                "Publish drafts in model",
+                ["blog-post", "page", "both"],
+                horizontal=True,
+                key="publish_model_select",
+            )
+
+            # Fetch drafts count first
+            if st.button("Check Draft Count", key="check_drafts_btn"):
+                client = BuilderClient(builder_private_key)
+                models_to_check = ["blog-post", "page"] if pub_model == "both" else [pub_model]
+                total_drafts = 0
+                for m in models_to_check:
+                    drafts = client.fetch_draft_entries(limit=200, model_override=m)
+                    count = len(drafts)
+                    total_drafts += count
+                    st.info(f"**{m}**: {count} draft entries")
+                st.session_state["draft_count"] = total_drafts
+
+            draft_count = st.session_state.get("draft_count", None)
+
+            if draft_count is not None and draft_count > 0:
+                st.warning(
+                    f"This will publish **{draft_count}** draft entries. "
+                    "Make sure you have reviewed them in the Builder.io editor first."
+                )
+
+                confirm = st.checkbox(
+                    "I have reviewed the drafts and want to publish them all",
+                    key="confirm_publish_drafts",
+                )
+
+                if confirm:
+                    if st.button(
+                        "Publish All Drafts",
+                        type="primary",
+                        use_container_width=True,
+                        key="publish_all_drafts_btn",
+                    ):
+                        client = BuilderClient(builder_private_key)
+                        models_to_publish = ["blog-post", "page"] if pub_model == "both" else [pub_model]
+
+                        all_results = {"total": 0, "published": 0, "failed": 0, "details": []}
+
+                        for m in models_to_publish:
+                            st.markdown(f"**Publishing drafts in `{m}`...**")
+                            progress = st.progress(0)
+                            status = st.empty()
+
+                            def on_progress(current, total, name, _m=m, _progress=progress, _status=status):
+                                _progress.progress(current / total if total > 0 else 1.0)
+                                _status.markdown(f"[{current}/{total}] Publishing: {name[:50]}")
+
+                            result = client.publish_all_drafts(
+                                model_override=m,
+                                progress_callback=on_progress,
+                            )
+
+                            progress.progress(1.0)
+                            all_results["total"] += result["total"]
+                            all_results["published"] += result["published"]
+                            all_results["failed"] += result["failed"]
+                            all_results["details"].extend(result["details"])
+
+                            if result["published"] > 0:
+                                st.success(f"Published {result['published']}/{result['total']} entries in `{m}`")
+                            if result["failed"] > 0:
+                                st.error(f"Failed to publish {result['failed']} entries in `{m}`")
+
+                        st.markdown(
+                            f"**Done!** Published {all_results['published']}/{all_results['total']} total drafts."
+                        )
+                        st.session_state["draft_count"] = None  # Reset count
+
+            elif draft_count == 0:
+                st.success("No draft entries found - everything is already published!")
+
 
 # ========================== TAB 5: RESULTS & EXPORT ==========================
 with tab_results:
