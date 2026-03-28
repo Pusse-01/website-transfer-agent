@@ -42,6 +42,8 @@ class MigrationAgent:
         source_base_url: str,
         builder_api_key: str,
         builder_model: str = "blog-post",
+        blog_model: str = "blog-post",
+        page_model: str = "page",
         blog_path: str = "/blog/",
         download_dir: str = "downloaded_images",
         run_id: str = None,
@@ -50,7 +52,10 @@ class MigrationAgent:
         self.blog_scraper = BlogScraper(source_base_url, blog_path)
         self.static_scraper = StaticPageScraper(source_base_url)
         self.image_handler = ImageHandler(builder_api_key, download_dir)
-        self.builder = BuilderClient(builder_api_key, builder_model)
+        self.builder = BuilderClient(
+            builder_api_key, builder_model,
+            blog_model=blog_model, page_model=page_model,
+        )
         self.blog_path = blog_path
 
         # Logger
@@ -337,7 +342,7 @@ class MigrationAgent:
         try:
             # Step 1: Check if already exists
             if skip_existing and not dry_run:
-                model = "blog-post" if page_type == "blog" else "page"
+                model = self.builder.blog_model if page_type == "blog" else self.builder.page_model
                 if self.builder.check_entry_exists(url_key, model_override=model):
                     self.mlog.info(url_key, page_type, "upload",
                                    "Skipping - already exists in Builder.io")

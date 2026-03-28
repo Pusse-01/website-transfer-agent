@@ -31,9 +31,12 @@ class BuilderClient:
     BASE_URL = "https://builder.io/api/v1/write"
     CDN_BASE_URL = "https://cdn.builder.io/api/v3/content"
 
-    def __init__(self, api_key: str, model_name: str = "blog-post"):
+    def __init__(self, api_key: str, model_name: str = "blog-post",
+                 blog_model: str = "blog-post", page_model: str = "page"):
         self.api_key = api_key
         self.model_name = model_name
+        self.blog_model = blog_model
+        self.page_model = page_model
         # Private keys start with "bpk-"; public keys don't
         self._is_private_key = api_key.startswith("bpk-")
         self.session = requests.Session()
@@ -122,7 +125,7 @@ class BuilderClient:
         if blog_data.get("meta_description"):
             entry["data"]["metaDescription"] = blog_data["meta_description"]
 
-        return self._create_content(entry, model_override="blog-post")
+        return self._create_content(entry, model_override=self.blog_model)
 
     def create_static_page_entry(self, page_data: dict, publish: bool = False) -> dict:
         """
@@ -171,7 +174,7 @@ class BuilderClient:
         if page_data.get("thumbnail"):
             entry["data"]["coverImage"] = page_data["thumbnail"]
 
-        return self._create_content(entry, model_override="page")
+        return self._create_content(entry, model_override=self.page_model)
 
     def create_entry(self, page_data: dict, page_type: str = "blog", publish: bool = False) -> dict:
         """

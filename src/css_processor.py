@@ -1,5 +1,5 @@
 """
-CSS processing for migrated blog content.
+CSS processing and HTML sanitization for migrated content.
 
 The source website uses Magento Page Builder which relies on:
 - data-pb-style attributes with CSS selectors like #html-body [data-pb-style=XXX]
@@ -9,10 +9,13 @@ The source website uses Magento Page Builder which relies on:
 When migrating to Builder.io, the #html-body selector doesn't exist, so the
 embedded <style> rules don't apply and the layout collapses. This module fixes
 that by rewriting the CSS selectors and adding base Page Builder layout styles.
+
+It also sanitizes the HTML to remove scripts, navigation, and other non-content
+elements that break Builder.io's Custom Code block rendering.
 """
 
 import re
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 
 
 # Base CSS that replicates Magento Page Builder layout behavior
@@ -87,21 +90,108 @@ a { color: #236fa1; }
 mark { padding: 2px 4px; }
 """
 
+# Elements that should be completely removed from migrated content
+UNWANTED_SELECTORS = [
+    "script",
+    "noscript",
+    "iframe",
+    "link[rel='stylesheet']",
+    "link[rel='preload']",
+    "meta",
+    # Navigation and chrome
+    ".breadcrumbs",
+    ".breadcrumbs-root-o73",
+    "nav",
+    ".nav",
+    ".navigation",
+    ".vertical-menu",
+    "header",
+    ".header",
+    ".page-header",
+    ".pwa-header",
+    "footer",
+    ".footer",
+    ".page-footer",
+    ".pwa-footer",
+    # Magento UI elements
+    ".modal-popup",
+    ".modal-slide",
+    ".modals-wrapper",
+    ".loading-mask",
+    ".loader",
+    ".page-title-wrapper",
+    # Sidebar
+    ".sidebar",
+    ".sidebar-main",
+    ".sidebar-additional",
+    # Cookie/consent banners
+    ".cookie-notice",
+    ".cookie-consent",
+    "#cookie-status",
+    # Search
+    ".block-search",
+    ".search-autocomplete",
+    # Minicart
+    ".minicart-wrapper",
+    # Messages
+    ".messages",
+    ".page.messages",
+]
 
-def process_html_for_builder(html_content: str) -> str:
+
+def sanitize_html(html_content: str) -> str:
     """
-    Process scraped HTML so it renders correctly in Builder.io.
+    Remove scripts, navigation, and other non-content elements from HTML.
 
-    - Rewrites #html-body [data-pb-style=X] selectors to just [data-pb-style=X]
-    - Adds base Page Builder layout CSS
-    - Wraps everything in a styled container
+    This is critical for Builder.io — Custom Code blocks that contain <script>
+    tags render as raw text instead of executing/displaying properly.
     """
     if not html_content:
         return html_content
 
     soup = BeautifulSoup(html_content, "html.parser")
 
-    # Extract and fix existing <style> blocks
+    # Remove all unwanted elements
+    for selector in UNWANTED_SELECTORS:
+        for el in soup.select(selector):
+            el.decompose()
+
+    # Remove HTML comments (often contain template markers)
+    for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+        comment.extract()
+
+    # Remove elements with display:none inline style (hidden elements)
+    for el in soup.find_all(style=re.compile(r'display\s*:\s*none', re.IGNORECASE)):
+        el.decompose()
+
+    # Remove empty divs that are just wrappers with no content
+    for div in soup.find_all("div"):
+        if not div.get_text(strip=True) and not div.find("img") and not div.find("svg"):
+            # Check if it has meaningful attributes (like data-content-type)
+            if not any(attr.startswith("data-") for attr in div.attrs):
+                div.decompose()
+
+    return str(soup)
+
+
+def process_html_for_builder(html_content: str) -> str:
+    """
+    Process scraped HTML so it renders correctly in Builder.io.
+
+    1. Sanitize: remove scripts, nav, footer, and other non-content elements
+    2. Rewrite: fix #html-body CSS selectors
+    3. Style: add base Page Builder layout CSS
+    4. Wrap: in a styled container div
+    """
+    if not html_content:
+        return html_content
+
+    # Step 1: Sanitize — remove scripts and non-content elements
+    html_content = sanitize_html(html_content)
+
+    soup = BeautifulSoup(html_content, "html.parser")
+
+    # Step 2: Extract and fix existing <style> blocks
     existing_styles = []
     for style_tag in soup.find_all("style"):
         css_text = style_tag.string or ""
@@ -110,10 +200,10 @@ def process_html_for_builder(html_content: str) -> str:
         existing_styles.append(fixed_css)
         style_tag.decompose()
 
-    # Build the combined CSS
+    # Step 3: Build the combined CSS
     combined_css = PAGEBUILDER_BASE_CSS + "\n" + "\n".join(existing_styles)
 
-    # Build the final HTML with styles included
+    # Step 4: Build the final HTML with styles included
     body_html = str(soup)
 
     styled_html = f"""<div class="migrated-blog-content">

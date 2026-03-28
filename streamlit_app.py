@@ -99,6 +99,16 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Builder.io")
+    builder_blog_model = st.text_input(
+        "Blog Post Model Name",
+        value=os.getenv("BUILDER_BLOG_MODEL", "blog-post"),
+        help="Builder.io model API name for blog posts",
+    )
+    builder_page_model = st.text_input(
+        "Static Page Model Name",
+        value=os.getenv("BUILDER_PAGE_MODEL", "page"),
+        help="Builder.io model API name for static pages (check Models in Builder.io settings)",
+    )
     builder_public_key = st.text_input(
         "Public API Key",
         value=os.getenv("BUILDER_PUBLIC_KEY", "6be3ec8a86714634979b0d3ca2064d06"),
@@ -243,7 +253,7 @@ with tab_input:
                         }
                         for p in blog_posts[:20]
                     ]
-                    st.dataframe(preview, use_container_width=True)
+                    st.dataframe(preview, width="stretch")
                     if len(blog_posts) > 20:
                         st.caption(f"... and {len(blog_posts) - 20} more")
 
@@ -284,7 +294,7 @@ with tab_input:
                         }
                         for p in static_pages[:20]
                     ]
-                    st.dataframe(preview, use_container_width=True)
+                    st.dataframe(preview, width="stretch")
                     if len(static_pages) > 20:
                         st.caption(f"... and {len(static_pages) - 20} more")
 
@@ -377,7 +387,7 @@ with tab_preview:
                     st.markdown(f"**Source URL:** {selected_page['primary_url']}")
 
             with col_btn:
-                scrape_preview = st.button("Scrape & Preview", type="primary", use_container_width=True)
+                scrape_preview = st.button("Scrape & Preview", type="primary", width="stretch")
 
             if scrape_preview:
                 url_key = selected_page.get("url_key", "")
@@ -501,7 +511,7 @@ with tab_pipeline:
         run_pipeline = st.button(
             "Start Migration Pipeline",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=st.session_state.pipeline_running,
         )
 
@@ -521,7 +531,9 @@ with tab_pipeline:
             agent = MigrationAgent(
                 source_base_url=source_url,
                 builder_api_key=builder_private_key,
-                builder_model="blog-post",
+                builder_model=builder_blog_model,
+                blog_model=builder_blog_model,
+                page_model=builder_page_model,
                 blog_path=blog_path,
             )
 
@@ -661,7 +673,7 @@ with tab_builder:
         col_fetch, col_info = st.columns([1, 3])
         with col_fetch:
             fetch_clicked = st.button(
-                "Fetch Content", type="primary", use_container_width=True
+                "Fetch Content", type="primary", width="stretch"
             )
 
         if fetch_clicked:
@@ -687,7 +699,7 @@ with tab_builder:
                     "Status": entry.get("published", ""),
                     "Has Blocks": "Yes" if data.get("blocks") else "No",
                 })
-            st.dataframe(table_data, use_container_width=True)
+            st.dataframe(table_data, width="stretch")
 
             st.divider()
             entry_labels = [
@@ -774,7 +786,7 @@ with tab_builder:
                     if st.button(
                         "Publish All Drafts",
                         type="primary",
-                        use_container_width=True,
+                        width="stretch",
                         key="publish_all_drafts_btn",
                     ):
                         client = BuilderClient(builder_private_key)
@@ -836,7 +848,7 @@ with tab_results:
                     "Failed": run.get("failed", 0),
                     "Review": run.get("needs_review", 0),
                 })
-            st.dataframe(run_table, use_container_width=True)
+            st.dataframe(run_table, width="stretch")
 
             run_ids = [r["run_id"] for r in past_runs]
             current_idx = 0
@@ -851,7 +863,7 @@ with tab_results:
                 key="past_run_select",
             )
 
-            if st.button("Load Selected Run", use_container_width=True):
+            if st.button("Load Selected Run", width="stretch"):
                 loaded = load_run(selected_run_id)
                 if loaded and loaded.get("migration_results"):
                     st.session_state.migration_results = loaded["migration_results"]
@@ -902,7 +914,7 @@ with tab_results:
                     "Images": d.get("images_processed", 0),
                     "Error": (d.get("error", "") or "")[:40],
                 })
-            st.dataframe(table_data, use_container_width=True)
+            st.dataframe(table_data, width="stretch")
 
         # Export buttons
         st.divider()
@@ -919,10 +931,10 @@ with tab_results:
                         data=f.read(),
                         file_name=f"migration_results_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
+                        width="stretch",
                     )
             else:
-                if st.button("Generate Excel Report", use_container_width=True):
+                if st.button("Generate Excel Report", width="stretch"):
                     try:
                         path = export_blog_results(r)
                         st.session_state["results_excel_path"] = path
@@ -945,7 +957,7 @@ with tab_results:
                 data=json.dumps(r, indent=2, ensure_ascii=False),
                 file_name="migration_results.json",
                 mime="application/json",
-                use_container_width=True,
+                width="stretch",
             )
 
         with col_log:
@@ -957,7 +969,7 @@ with tab_results:
                         data=f.read(),
                         file_name="migration_log.json",
                         mime="application/json",
-                        use_container_width=True,
+                        width="stretch",
                     )
 
 

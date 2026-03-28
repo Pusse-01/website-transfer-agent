@@ -251,12 +251,17 @@ class BlogScraper:
         ]:
             el = soup.select_one(selector)
             if el:
+                # Remove non-content elements
+                for unwanted in el.select("script, noscript, iframe, link, meta, nav, .nav, header, footer"):
+                    unwanted.decompose()
                 html_content = str(el)
                 break
 
         if not html_content:
             main = soup.select_one("main") or soup.select_one("#maincontent")
             if main:
+                for unwanted in main.select("script, noscript, iframe, link, meta, nav, .nav, header, footer"):
+                    unwanted.decompose()
                 html_content = str(main)
 
         thumbnail = ""
@@ -472,12 +477,24 @@ class StaticPageScraper:
         ]:
             el = soup.select_one(selector)
             if el:
-                # Remove navigation, breadcrumbs, sidebar elements
+                # Remove all non-content elements aggressively
                 for unwanted in el.select(
-                    ".breadcrumbs, .sidebar, nav, .nav, header, footer, "
-                    ".page-title-wrapper, script, .modal-popup"
+                    "script, noscript, iframe, link, meta, "
+                    ".breadcrumbs, .sidebar, .sidebar-main, .sidebar-additional, "
+                    "nav, .nav, .navigation, .vertical-menu, "
+                    "header, .header, .page-header, .pwa-header, "
+                    "footer, .footer, .page-footer, .pwa-footer, "
+                    ".page-title-wrapper, .modal-popup, .modal-slide, "
+                    ".modals-wrapper, .loading-mask, .loader, "
+                    ".minicart-wrapper, .block-search, .search-autocomplete, "
+                    ".cookie-notice, .cookie-consent, #cookie-status, "
+                    ".messages, .page.messages"
                 ):
                     unwanted.decompose()
+                # Also remove HTML comments
+                from bs4 import Comment
+                for comment in el.find_all(string=lambda text: isinstance(text, Comment)):
+                    comment.extract()
                 html_content = str(el)
                 break
 
