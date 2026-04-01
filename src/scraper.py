@@ -190,6 +190,11 @@ class BlogScraper:
         else:
             tags = []
 
+        # Strip .html extension from url_key
+        url_key = post_data.get("url_key", "")
+        if url_key.endswith(".html"):
+            url_key = url_key[:-5]
+
         return {
             "title": post_data.get("title", ""),
             "html_content": html_content,
@@ -199,7 +204,7 @@ class BlogScraper:
             "meta_description": post_data.get("meta_description", ""),
             "categories": post_data.get("categories", []),
             "tags": tags,
-            "url_key": post_data.get("url_key", ""),
+            "url_key": url_key,
             "published_at": post_data.get("published_at", ""),
             "created_at": post_data.get("created_at", ""),
             "updated_at": post_data.get("updated_at", ""),
@@ -272,6 +277,10 @@ class BlogScraper:
         meta_el = soup.select_one('meta[name="description"]')
         if meta_el:
             meta_desc = meta_el.get("content", "")
+
+        # Strip .html extension from url_key
+        if url_key.endswith(".html"):
+            url_key = url_key[:-5]
 
         return {
             "title": title,
