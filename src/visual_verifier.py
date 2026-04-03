@@ -262,12 +262,12 @@ class VisualVerifier:
 
         label = url_key or hashlib.md5(original_url.encode()).hexdigest()[:12]
 
-        # Step 1: Screenshot original
+        # Step 1: Screenshot original (for reference / future comparison)
         orig_path = await self.capture_screenshot(original_url, f"original_{label}")
         if orig_path:
             result.original_screenshot = orig_path
 
-        # Step 2: Screenshot Builder.io preview
+        # Step 2: Screenshot Builder.io preview (if URL provided)
         builder_path = None
         if builder_preview_url:
             builder_path = await self.capture_screenshot(
@@ -276,15 +276,17 @@ class VisualVerifier:
             if builder_path:
                 result.builder_screenshot = builder_path
 
-        # Step 3: Detect duplicates in builder screenshot
-        target_screenshot = builder_path or orig_path
-        if target_screenshot:
-            dups = self.detect_duplicate_strips(target_screenshot)
+        # Step 3: Detect visual duplicates via strip comparison.
+        # ONLY run this on the Builder.io screenshot — the original source page
+        # may have legitimately similar-looking sections (e.g. repeated store
+        # info banners for different branches) that are NOT duplicates.
+        if builder_path:
+            dups = self.detect_duplicate_strips(builder_path)
             result.duplicate_regions = dups
             result.has_duplicates = len(dups) > 0
             if dups:
                 result.issues.append(
-                    f"Found {len(dups)} duplicate region(s) in the page screenshot. "
+                    f"Found {len(dups)} duplicate region(s) in the Builder.io preview. "
                     "The same content may be repeated."
                 )
 

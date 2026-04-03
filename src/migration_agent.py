@@ -25,6 +25,7 @@ from .builder_client import BuilderClient
 from .excel_reader import read_blog_list, read_static_page_list, detect_excel_type
 from .migration_logger import MigrationLogger
 from .visual_verifier import VisualVerifier, run_visual_verification
+from .deduplication import deduplicate_content_blocks, deduplicate_similar_images
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +425,18 @@ class MigrationAgent:
                     except Exception as e:
                         self.mlog.warning(url_key, page_type, "images",
                                          f"Thumbnail processing error: {e}")
+
+            # Step 4b: Deduplicate content blocks and images
+            # Run explicitly here so page_data["html_content"] is clean for
+            # both the upload step and the visual verification step.
+            if not dry_run:
+                html = page_data["html_content"]
+                html, blocks_removed = deduplicate_content_blocks(html)
+                html, imgs_removed = deduplicate_similar_images(html)
+                page_data["html_content"] = html
+                if blocks_removed or imgs_removed:
+                    self.mlog.info(url_key, page_type, "transform",
+                                   f"Deduplication: removed {blocks_removed} block(s), {imgs_removed} image(s)")
 
             # Step 5: Upload to Builder.io
             if dry_run:

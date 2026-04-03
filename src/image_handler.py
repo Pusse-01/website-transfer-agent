@@ -183,16 +183,18 @@ class ImageHandler:
 
             resolved_src = src if src.startswith("http") else urljoin(base_url, src)
 
-            # Remove duplicate <img> elements that share the same source image
+            # Remove duplicate <img> elements that share the same source image.
+            # We match on the *original* resolved URL (before Builder.io upload
+            # rewrites the src), so this catches duplicates reliably.
             if resolved_src in seen_img_srcs:
-                first_img = seen_img_srcs[resolved_src]
-                if self._is_duplicate_image_block(first_img, img):
-                    block_parent = self._find_image_wrapper(img)
-                    if block_parent:
-                        block_parent.decompose()
-                    else:
-                        img.decompose()
-                    continue
+                block_parent = self._find_image_wrapper(img)
+                if block_parent:
+                    logger.info("Removing duplicate image block (src: %.60s...)", resolved_src[:60])
+                    block_parent.decompose()
+                else:
+                    logger.info("Removing duplicate <img> (src: %.60s...)", resolved_src[:60])
+                    img.decompose()
+                continue
 
             seen_img_srcs[resolved_src] = img
             original_src = src
@@ -251,12 +253,6 @@ class ImageHandler:
                 tag["style"] = bg_pattern.sub(replace_bg_url, style)
 
         return str(soup), image_mappings
-
-    def _is_duplicate_image_block(self, first_img, current_img) -> bool:
-        """Check if current_img is a duplicate of first_img (same image repeated)."""
-        first_src = first_img.get("src") or first_img.get("data-src") or ""
-        current_src = current_img.get("src") or current_img.get("data-src") or ""
-        return first_src == current_src
 
     def _find_image_wrapper(self, img) -> object | None:
         """Find the nearest block-level parent that wraps primarily this image.
