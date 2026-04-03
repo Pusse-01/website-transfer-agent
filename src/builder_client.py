@@ -62,14 +62,18 @@ class BuilderClient:
             url = f"{self.CDN_BASE_URL}/{model}?apiKey={self.api_key}{sep}{extra_params}"
         return url
 
-    def create_blog_entry(self, blog_data: dict, publish: bool = False) -> dict:
+    def create_blog_entry(self, blog_data: dict, publish: bool = False, existing_entry_id: str = None) -> dict:
         """
-        Create a new blog article entry in Builder.io under the 'blog-post' model.
+        Create or update a blog article entry in Builder.io under the 'blog-post' model.
+
+        If existing_entry_id is provided, the entry is updated instead of created,
+        preventing duplicate pages when re-running migrations.
 
         Args:
             blog_data: Dict with keys: title, html_content, thumbnail, url_key,
                        meta_title, meta_description, categories, tags, published_at
             publish: Whether to publish immediately or save as draft
+            existing_entry_id: If set, update this entry instead of creating a new one
 
         Returns:
             Dict with 'success' bool and 'data' or 'error'
@@ -125,9 +129,11 @@ class BuilderClient:
         if blog_data.get("meta_description"):
             entry["data"]["metaDescription"] = blog_data["meta_description"]
 
+        if existing_entry_id:
+            return self.update_entry(existing_entry_id, entry, model_override=self.blog_model)
         return self._create_content(entry, model_override=self.blog_model)
 
-    def create_static_page_entry(self, page_data: dict, publish: bool = False) -> dict:
+    def create_static_page_entry(self, page_data: dict, publish: bool = False, existing_entry_id: str = None) -> dict:
         """
         Create a new static page entry in Builder.io under the 'page' model.
 
@@ -174,21 +180,27 @@ class BuilderClient:
         if page_data.get("thumbnail"):
             entry["data"]["coverImage"] = page_data["thumbnail"]
 
+        if existing_entry_id:
+            return self.update_entry(existing_entry_id, entry, model_override=self.page_model)
         return self._create_content(entry, model_override=self.page_model)
 
-    def create_entry(self, page_data: dict, page_type: str = "blog", publish: bool = False) -> dict:
+    def create_entry(self, page_data: dict, page_type: str = "blog", publish: bool = False, existing_entry_id: str = None) -> dict:
         """
-        Unified entry creation - routes to blog or static page based on page_type.
+        Unified entry creation/update - routes to blog or static page based on page_type.
+
+        If existing_entry_id is provided, updates the existing entry instead of
+        creating a duplicate.
 
         Args:
             page_data: Page content dict
             page_type: 'blog' or 'static'
             publish: Whether to publish immediately
+            existing_entry_id: If set, update this entry instead of creating a new one
         """
         if page_type == "static":
-            return self.create_static_page_entry(page_data, publish)
+            return self.create_static_page_entry(page_data, publish, existing_entry_id=existing_entry_id)
         else:
-            return self.create_blog_entry(page_data, publish)
+            return self.create_blog_entry(page_data, publish, existing_entry_id=existing_entry_id)
 
     def _create_content(self, entry: dict, model_override: str = None) -> dict:
         """Send the content creation request to Builder.io with rate limiting."""
@@ -448,22 +460,62 @@ class BuilderClient:
 
         return results
 
-    def check_entry_exists(self, url_key: str, model_override: str = None) -> bool:
-        """Check if an entry with this URL key already exists."""
+    def check_entry_exists(self, url_key: str, model_override: str = None) -> dict | None:
+        """Check if an entry with this URL key already exists.
+
+        Returns:
+            The existing entry dict (with 'id') if found, or None.
+            Truthy when entry exists, falsy when it doesn't — backward compatible
+            with code that used the old boolean return value.
+        """
         model = model_override or self.model_name
         self._rate_limit(READ_DELAY_SECONDS)
 
-        params = f"query.data.slug={url_key}&limit=1&fields=id,name&includeUnpublished=true"
+        params = f"query.data.slug={url_key}&limit=1&fields=id,name,data.slug&includeUnpublished=true"
         check_url = self._cdn_url(model, params)
         try:
             response = self.session.get(check_url, timeout=15)
             response.raise_for_status()
             data = response.json()
             results = data.get("results", [])
-            return len(results) > 0
+            return results[0] if results else None
         except Exception as e:
             logger.warning(f"Could not check for existing entry {url_key}: {e}")
-            return False
+            return None
+
+    def update_entry(self, entry_id: str, entry: dict, model_override: str = None) -> dict:
+        """Update an existing Builder.io content entry by ID."""
+        model = model_override or self.model_name
+        url = f"{self.BASE_URL}/{model}/{entry_id}"
+
+        self._rate_limit(WRITE_DELAY_SECONDS)
+
+        try:
+            response = self.session.put(url, json=entry, timeout=60)
+
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", 10))
+                logger.warning(f"Rate limited, waiting {retry_after}s...")
+                time.sleep(retry_after)
+                response = self.session.put(url, json=entry, timeout=60)
+
+            response.raise_for_status()
+            result = response.json()
+            logger.info(f"Updated Builder.io entry: {entry.get('name', entry_id)} (model: {model})")
+            return {"success": True, "data": result}
+
+        except requests.exceptions.HTTPError as e:
+            error_body = ""
+            try:
+                error_body = e.response.text
+            except Exception:
+                pass
+            logger.error(f"Builder.io API error on update: {e} - {error_body}")
+            return {"success": False, "error": str(e), "details": error_body}
+
+        except Exception as e:
+            logger.error(f"Failed to update Builder.io entry: {e}")
+            return {"success": False, "error": str(e)}
 
     def list_entries(self, limit: int = 25, offset: int = 0, model_override: str = None) -> list[dict]:
         """List existing entries in Builder.io."""

@@ -340,14 +340,18 @@ class MigrationAgent:
         }
 
         try:
-            # Step 1: Check if already exists
-            if skip_existing and not dry_run:
+            # Step 1: Check if already exists (for skip or upsert)
+            existing_entry = None
+            existing_entry_id = None
+            if not dry_run:
                 model = self.builder.blog_model if page_type == "blog" else self.builder.page_model
-                if self.builder.check_entry_exists(url_key, model_override=model):
+                existing_entry = self.builder.check_entry_exists(url_key, model_override=model)
+                if existing_entry and skip_existing:
                     self.mlog.info(url_key, page_type, "upload",
                                    "Skipping - already exists in Builder.io")
                     result["status"] = STATUS_SKIPPED
                     return result
+                existing_entry_id = existing_entry.get("id") if existing_entry else None
 
             # Step 2: Scrape the page
             self.mlog.info(url_key, page_type, "scrape", "Scraping content...")
@@ -425,13 +429,15 @@ class MigrationAgent:
                     result["status"] = STATUS_PUBLISHED
                 result["dry_run"] = True
             else:
-                self.mlog.info(url_key, page_type, "upload", "Creating Builder.io entry...")
+                action = "Updating" if existing_entry_id else "Creating"
+                self.mlog.info(url_key, page_type, "upload", f"{action} Builder.io entry...")
 
                 # If low confidence, always save as draft for human review
                 should_publish = publish and confidence != "low"
 
                 api_result = self.builder.create_entry(
-                    page_data, page_type=page_type, publish=should_publish
+                    page_data, page_type=page_type, publish=should_publish,
+                    existing_entry_id=existing_entry_id,
                 )
 
                 if api_result.get("success"):
@@ -440,8 +446,9 @@ class MigrationAgent:
                     if result["status"] != STATUS_NEEDS_REVIEW:
                         result["status"] = STATUS_PUBLISHED
 
+                    verb = "updated" if existing_entry_id else "created"
                     self.mlog.info(url_key, page_type, "upload",
-                                   f"Successfully uploaded: {page_data.get('title', url_key)}",
+                                   f"Successfully {verb}: {page_data.get('title', url_key)}",
                                    {"builder_id": result["builder_id"],
                                     "published": should_publish})
                 else:
