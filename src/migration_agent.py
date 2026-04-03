@@ -5,8 +5,10 @@ Handles both blog posts and static CMS pages:
 1. Read page list from Excel
 2. Scrape content from source (GraphQL + HTML fallback)
 3. Process images (download + re-upload to Builder.io)
-4. Upload content to Builder.io (blog-post or page model)
-5. Track status and export results
+4. Deduplicate content blocks & images (structural + visual)
+5. Upload content to Builder.io (blog-post or page model)
+6. Visual verification — screenshot comparison to catch remaining duplicates
+7. Track status and export results
 
 Every step is logged with the page_key for filtering.
 """
@@ -22,6 +24,7 @@ from .image_handler import ImageHandler
 from .builder_client import BuilderClient
 from .excel_reader import read_blog_list, read_static_page_list, detect_excel_type
 from .migration_logger import MigrationLogger
+from .visual_verifier import VisualVerifier, run_visual_verification
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +60,7 @@ class MigrationAgent:
             blog_model=blog_model, page_model=page_model,
         )
         self.blog_path = blog_path
+        self.visual_verifier = VisualVerifier()
 
         # Logger
         self.mlog = MigrationLogger(run_id=run_id)
@@ -457,6 +461,33 @@ class MigrationAgent:
                     self.mlog.error(url_key, page_type, "upload",
                                     f"Upload failed: {result['error']}",
                                     {"details": api_result.get("details", "")})
+
+            # Step 6: Visual verification (non-blocking — issues are logged but don't fail the migration)
+            if not dry_run and result["status"] in (STATUS_PUBLISHED, STATUS_NEEDS_REVIEW):
+                try:
+                    self.mlog.info(url_key, page_type, "verify", "Running visual verification...")
+                    verification = run_visual_verification(
+                        original_url=primary_url,
+                        page_html=page_data.get("html_content", ""),
+                        url_key=url_key,
+                    )
+                    if verification.has_duplicates:
+                        issues_str = "; ".join(verification.issues)
+                        self.mlog.warning(url_key, page_type, "verify",
+                                          f"Visual verification found issues: {issues_str}",
+                                          {"duplicate_regions": len(verification.duplicate_regions)})
+                        result["visual_issues"] = verification.issues
+                        if result["status"] != STATUS_NEEDS_REVIEW:
+                            result["status"] = STATUS_NEEDS_REVIEW
+                            result["confidence"] = "medium"
+                            self.results["needs_review"] += 1
+                            self.results["success"] -= 1
+                    else:
+                        self.mlog.info(url_key, page_type, "verify",
+                                       "Visual verification passed — no duplicates detected")
+                except Exception as e:
+                    self.mlog.warning(url_key, page_type, "verify",
+                                     f"Visual verification skipped (non-critical): {e}")
 
         except Exception as e:
             result["status"] = STATUS_FAILED

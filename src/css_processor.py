@@ -20,6 +20,10 @@ import logging
 from bs4 import BeautifulSoup, Comment
 from premailer import Premailer
 
+from .deduplication import deduplicate_content_blocks, deduplicate_similar_images
+
+logger = logging.getLogger(__name__)
+
 
 # Base CSS that replicates Magento Page Builder layout behavior
 PAGEBUILDER_BASE_CSS = """
@@ -248,6 +252,12 @@ def process_html_for_builder(html_content: str) -> str:
 
     # Step 1: Sanitize — remove scripts and non-content elements
     html_content = sanitize_html(html_content)
+
+    # Step 1b: Deduplicate content blocks (removes repeated sections/banners)
+    html_content, blocks_removed = deduplicate_content_blocks(html_content)
+    html_content, imgs_removed = deduplicate_similar_images(html_content)
+    if blocks_removed or imgs_removed:
+        logger.info("Deduplication: removed %d block(s), %d image(s)", blocks_removed, imgs_removed)
 
     soup = BeautifulSoup(html_content, "html.parser")
 
