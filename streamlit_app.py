@@ -535,6 +535,7 @@ with tab_pipeline:
                 blog_model=builder_blog_model,
                 page_model=builder_page_model,
                 blog_path=blog_path,
+                builder_public_key=builder_public_key,
             )
 
             # Build the migration list

@@ -32,8 +32,10 @@ class BuilderClient:
     CDN_BASE_URL = "https://cdn.builder.io/api/v3/content"
 
     def __init__(self, api_key: str, model_name: str = "blog-post",
-                 blog_model: str = "blog-post", page_model: str = "page"):
+                 blog_model: str = "blog-post", page_model: str = "page",
+                 public_key: str = ""):
         self.api_key = api_key
+        self.public_key = public_key
         self.model_name = model_name
         self.blog_model = blog_model
         self.page_model = page_model
@@ -50,16 +52,14 @@ class BuilderClient:
     def _cdn_url(self, model: str, extra_params: str = "") -> str:
         """Build a CDN read URL.
 
-        Private keys authenticate via the Authorization header (already on
-        the session), so we omit the apiKey query param.  Public keys must
-        be passed as a query param because they don't use Bearer auth.
+        The CDN API (v3) always requires a public API key as a query param.
+        Private keys (bpk-*) are only for the Write API (v1).
+        If a public_key was provided, use it; otherwise fall back to the
+        api_key (which works if it's already a public key).
         """
-        if self._is_private_key:
-            # Auth goes through the header — no apiKey in URL
-            url = f"{self.CDN_BASE_URL}/{model}?{extra_params}" if extra_params else f"{self.CDN_BASE_URL}/{model}"
-        else:
-            sep = "&" if extra_params else ""
-            url = f"{self.CDN_BASE_URL}/{model}?apiKey={self.api_key}{sep}{extra_params}"
+        read_key = self.public_key or self.api_key
+        sep = "&" if extra_params else ""
+        url = f"{self.CDN_BASE_URL}/{model}?apiKey={read_key}{sep}{extra_params}"
         return url
 
     def create_blog_entry(self, blog_data: dict, publish: bool = False, existing_entry_id: str = None) -> dict:
@@ -317,6 +317,21 @@ class BuilderClient:
         ]
 
         return blocks
+
+    def get_preview_url(self, entry_id: str, model_override: str = None) -> str | None:
+        """Build a Builder.io preview URL for visual verification.
+
+        Returns a CDN URL that renders the entry's content with preview=true,
+        or None if no public key is configured.
+        """
+        read_key = self.public_key or (self.api_key if not self._is_private_key else "")
+        if not read_key:
+            return None
+        model = model_override or self.model_name
+        return (
+            f"{self.CDN_BASE_URL}/{model}/{entry_id}"
+            f"?apiKey={read_key}&preview=true&includeUnpublished=true"
+        )
 
     def _current_iso_date(self) -> str:
         """Return current datetime in ISO format."""

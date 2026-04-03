@@ -51,6 +51,7 @@ class MigrationAgent:
         blog_path: str = "/blog/",
         download_dir: str = "downloaded_images",
         run_id: str = None,
+        builder_public_key: str = "",
     ):
         self.source_base_url = source_base_url
         self.blog_scraper = BlogScraper(source_base_url, blog_path)
@@ -59,6 +60,7 @@ class MigrationAgent:
         self.builder = BuilderClient(
             builder_api_key, builder_model,
             blog_model=blog_model, page_model=page_model,
+            public_key=builder_public_key,
         )
         self.blog_path = blog_path
         self.visual_verifier = VisualVerifier()
@@ -479,8 +481,18 @@ class MigrationAgent:
             if not dry_run and result["status"] in (STATUS_PUBLISHED, STATUS_NEEDS_REVIEW):
                 try:
                     self.mlog.info(url_key, page_type, "verify", "Running visual verification...")
+
+                    # Build Builder.io preview URL for screenshot comparison
+                    builder_preview_url = ""
+                    if result.get("builder_id"):
+                        model = self.builder.blog_model if page_type == "blog" else self.builder.page_model
+                        builder_preview_url = self.builder.get_preview_url(
+                            result["builder_id"], model_override=model
+                        ) or ""
+
                     verification = run_visual_verification(
                         original_url=primary_url,
+                        builder_preview_url=builder_preview_url,
                         page_html=page_data.get("html_content", ""),
                         url_key=url_key,
                     )

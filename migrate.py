@@ -151,6 +151,7 @@ def main():
         sys.exit(1)
 
     source_url = args.source_url or os.getenv("SOURCE_BASE_URL", "https://www.pricerite.com.hk")
+    public_key = os.getenv("BUILDER_PUBLIC_KEY", "")
 
     if args.dry_run and not api_key:
         api_key = "dry-run-placeholder"
@@ -169,6 +170,7 @@ def main():
         builder_api_key=api_key,
         builder_model="blog-post",
         blog_path=args.blog_path,
+        builder_public_key=public_key,
     )
 
     # Run migration based on input
