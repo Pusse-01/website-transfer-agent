@@ -26,6 +26,8 @@ def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
     categories = post_data.get("categories", [])
     published_at = post_data.get("published_at", "")
     url_key = post_data.get("url_key", "")
+    page_type = post_data.get("page_type", "")
+    is_static_page = page_type == "static"
 
     # Build tags HTML
     tags_html = ""
@@ -59,6 +61,21 @@ def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
         f'<div class="meta">{"  |  ".join(meta_parts)}</div>' if meta_parts else ""
     )
 
+    body_padding = "0" if is_static_page else "24px"
+    body_max_width = "1440px" if is_static_page else "900px"
+    body_margin = "0 auto"
+    header_html = ""
+    if not is_static_page:
+        header_html = f"""
+    <div class="blog-header">
+        <h1>{title}</h1>
+        {meta_html}
+        {f'<p class="description">{meta_description}</p>' if meta_description else ''}
+        {categories_html}
+        {tags_html}
+    </div>
+    {thumbnail_html}"""
+
     return f"""<!DOCTYPE html>
 <html lang="zh-HK">
 <head>
@@ -77,9 +94,9 @@ def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
             line-height: 1.7;
             color: #333;
             background: #fff;
-            padding: 24px;
-            max-width: 900px;
-            margin: 0 auto;
+            padding: {body_padding};
+            max-width: {body_max_width};
+            margin: {body_margin};
         }}
         .blog-header {{
             margin-bottom: 24px;
@@ -198,14 +215,7 @@ def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
     </style>
 </head>
 <body>
-    <div class="blog-header">
-        <h1>{title}</h1>
-        {meta_html}
-        {f'<p class="description">{meta_description}</p>' if meta_description else ''}
-        {categories_html}
-        {tags_html}
-    </div>
-    {thumbnail_html}
+    {header_html}
     <div class="blog-content">
         {process_html_for_builder(html_content)}
     </div>

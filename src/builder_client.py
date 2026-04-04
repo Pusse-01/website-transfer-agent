@@ -91,7 +91,10 @@ class BuilderClient:
                 builder_tags.append({"tag": t})
 
         # Convert HTML content to Builder.io blocks format
-        blocks = self._html_to_builder_blocks(blog_data.get("html_content", ""))
+        blocks = self._html_to_builder_blocks(
+            blog_data.get("html_content", ""),
+            wide_layout=False,
+        )
 
         entry = {
             "name": blog_data.get("title", "Untitled"),
@@ -149,7 +152,10 @@ class BuilderClient:
         # Static pages go directly under root path
         url_path = f"/{url_key}" if url_key else "/"
 
-        blocks = self._html_to_builder_blocks(page_data.get("html_content", ""))
+        blocks = self._html_to_builder_blocks(
+            page_data.get("html_content", ""),
+            wide_layout=True,
+        )
 
         entry = {
             "name": page_data.get("title", "Untitled"),
@@ -248,7 +254,7 @@ class BuilderClient:
         self._last_request_time = time.time()
         self._request_count += 1
 
-    def _html_to_builder_blocks(self, html_content: str) -> list[dict]:
+    def _html_to_builder_blocks(self, html_content: str, wide_layout: bool = False) -> list[dict]:
         """
         Convert HTML content to Builder.io block format.
 
@@ -262,6 +268,9 @@ class BuilderClient:
 
         # Process HTML to fix Magento Page Builder CSS and add base styles
         html_content = process_html_for_builder(html_content)
+        section_max_width = 1440 if wide_layout else 900
+        section_padding = "0px" if wide_layout else "20px"
+        custom_code_margin_top = "0px" if wide_layout else "20px"
 
         blocks = [
             {
@@ -271,7 +280,7 @@ class BuilderClient:
                 "component": {
                     "name": "Core:Section",
                     "options": {
-                        "maxWidth": 900,
+                        "maxWidth": section_max_width,
                         "lazyLoad": False,
                     },
                 },
@@ -293,7 +302,8 @@ class BuilderClient:
                                 "position": "relative",
                                 "flexShrink": "0",
                                 "boxSizing": "border-box",
-                                "marginTop": "20px",
+                                "marginTop": custom_code_margin_top,
+                                "width": "100%",
                             }
                         },
                     }
@@ -306,11 +316,12 @@ class BuilderClient:
                         "flexShrink": "0",
                         "boxSizing": "border-box",
                         "marginTop": "0px",
-                        "paddingLeft": "20px",
-                        "paddingRight": "20px",
-                        "paddingTop": "20px",
-                        "paddingBottom": "20px",
+                        "paddingLeft": section_padding,
+                        "paddingRight": section_padding,
+                        "paddingTop": section_padding,
+                        "paddingBottom": section_padding,
                         "minHeight": "100px",
+                        "width": "100%",
                     }
                 },
             }

@@ -116,7 +116,7 @@ with st.sidebar:
     )
     builder_private_key = st.text_input(
         "Private API Key",
-        value=os.getenv("BUILDER_API_KEY", ""),
+        value=os.getenv("BUILDER_PRIVATE_API_KEY", ""),
         type="password",
         help="Required for uploading to Builder.io",
     )
@@ -181,6 +181,8 @@ def builder_entry_to_preview_data(entry: dict) -> dict:
     data = entry.get("data", {})
     blocks = data.get("blocks", [])
     html_content = extract_html_from_blocks(blocks)
+    page_url = data.get("url", "") or ""
+    page_type = "blog" if page_url.startswith("/blog/") else "static"
 
     raw_tags = data.get("tags", [])
     tags = []
@@ -201,6 +203,7 @@ def builder_entry_to_preview_data(entry: dict) -> dict:
         "url_key": data.get("slug", ""),
         "published_at": data.get("publishDate", ""),
         "source": "builder.io",
+        "page_type": page_type,
     }
 
 

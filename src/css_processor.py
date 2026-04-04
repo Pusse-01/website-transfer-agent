@@ -14,9 +14,10 @@ It also sanitizes the HTML to remove scripts, navigation, and other non-content
 elements that break Builder.io's Custom Code block rendering.
 """
 
-import re
 import html
+import json
 import logging
+import re
 from bs4 import BeautifulSoup, Comment
 from premailer import Premailer
 
@@ -54,6 +55,9 @@ PAGEBUILDER_BASE_CSS = """
 }
 .pagebuilder-column {
     box-sizing: border-box;
+}
+.pagebuilder-slider {
+    width: 100%;
 }
 [data-content-type="text"] {
     margin-bottom: 0;
@@ -95,6 +99,33 @@ h2 { margin: 20px 0 12px; }
 h3 { margin: 16px 0 10px; }
 a { color: #236fa1; }
 mark { padding: 2px 4px; }
+
+/* Magento Page Builder button styles */
+.pagebuilder-button-primary,
+.pagebuilder-button-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 10rem;
+    min-height: 2.5rem;
+    padding: 0.75rem 1.5rem;
+    border-radius: 10px;
+    border: 1px solid #50b748;
+    font-weight: 700;
+    line-height: 1.2;
+    text-decoration: none;
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+.pagebuilder-button-primary {
+    background-color: #50b748;
+    border-color: #50b748;
+    color: #fff !important;
+}
+.pagebuilder-button-secondary {
+    background-color: transparent;
+    border-color: #50b748;
+    color: #50b748 !important;
+}
 """
 
 # Elements that should be completely removed from migrated content
@@ -304,6 +335,114 @@ def _merge_inline_style(existing: str, new_declarations: str) -> str:
     return existing + ";"
 
 
+def _set_inline_style_property(existing: str, prop: str, value: str) -> str:
+    """Set or replace a single inline style property."""
+    prop_key = prop.strip().lower()
+    declarations: list[tuple[str, str]] = []
+    replaced = False
+
+    for decl in (existing or "").split(";"):
+        decl = decl.strip()
+        if not decl or ":" not in decl:
+            continue
+        current_prop, current_value = decl.split(":", 1)
+        current_key = current_prop.strip().lower()
+        if current_key == prop_key:
+            if not replaced:
+                declarations.append((prop.strip(), value.strip()))
+                replaced = True
+        else:
+            declarations.append((current_prop.strip(), current_value.strip()))
+
+    if not replaced:
+        declarations.append((prop.strip(), value.strip()))
+
+    return "; ".join(f"{name}: {val}" for name, val in declarations) + ";"
+
+
+def _safe_int(value: str | None, default: int = 1) -> int:
+    """Parse a positive integer from a data attribute."""
+    try:
+        parsed = int(str(value).strip())
+        return parsed if parsed > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _extract_background_image(data_background_images: str) -> str:
+    """Extract the first usable background image URL from Magento JSON."""
+    if not data_background_images:
+        return ""
+
+    raw = html.unescape(data_background_images).strip()
+    if not raw or raw == "{}":
+        return ""
+
+    candidates = [
+        raw,
+        raw.replace('\\"', '"'),
+        raw.replace("'", '"'),
+    ]
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(parsed, dict):
+            for key in ("desktop_image", "tablet_image", "mobile_image"):
+                url = str(parsed.get(key, "")).strip()
+                if url:
+                    return url
+
+    fallback = re.search(
+        r'"(?:desktop_image|tablet_image|mobile_image)"\s*:\s*"([^"]+)"',
+        raw.replace('\\"', '"'),
+    )
+    return fallback.group(1).strip() if fallback else ""
+
+
+def _apply_background_image_styles(soup: BeautifulSoup) -> None:
+    """Promote Magento background image metadata into inline CSS."""
+    for el in soup.find_all(attrs={"data-background-type": "image"}):
+        image_url = _extract_background_image(el.get("data-background-images", ""))
+        if not image_url:
+            continue
+        el["style"] = _merge_inline_style(
+            el.get("style", ""),
+            f"background-image: url('{image_url}')"
+        )
+
+
+def _apply_slider_fallback_layout(soup: BeautifulSoup) -> None:
+    """Render Magento Page Builder sliders as static card grids in Builder."""
+    for slider in soup.find_all(attrs={"data-content-type": "slider"}):
+        pc_count = _safe_int(slider.get("data-pc-carousel-count"), 1)
+        gap_px = 16
+        slider["style"] = _merge_inline_style(
+            slider.get("style", ""),
+            f"display: flex; flex-wrap: wrap; align-items: stretch; gap: {gap_px}px; width: 100%"
+        )
+
+        slide_items = [child for child in slider.children if getattr(child, "name", None)]
+        if not slide_items:
+            continue
+
+        slide_width = "100%" if pc_count <= 1 else f"calc((100% - {(pc_count - 1) * gap_px}px) / {pc_count})"
+
+        for slide in slide_items:
+            style = slide.get("style", "")
+            style = _set_inline_style_property(style, "box-sizing", "border-box")
+            style = _set_inline_style_property(style, "display", "flex")
+            style = _set_inline_style_property(style, "flex-direction", "column")
+            style = _set_inline_style_property(style, "width", slide_width)
+            style = _set_inline_style_property(style, "max-width", slide_width)
+            style = _set_inline_style_property(style, "flex", f"0 0 {slide_width}")
+            style = _set_inline_style_property(style, "margin", "0")
+            slide["style"] = style
+
+
 def _apply_pagebuilder_layout_styles(soup: BeautifulSoup) -> None:
     """Apply critical Magento Page Builder layout styles directly as inline styles.
 
@@ -398,6 +537,9 @@ def _apply_pagebuilder_layout_styles(soup: BeautifulSoup) -> None:
     for el in soup.find_all(attrs={"data-content-type": "text"}):
         el["style"] = _merge_inline_style(el.get("style", ""), "margin-bottom: 0; word-wrap: break-word")
 
+    _apply_background_image_styles(soup)
+    _apply_slider_fallback_layout(soup)
+
 
 def process_html_for_builder(html_content: str) -> str:
     """
@@ -436,8 +578,9 @@ def process_html_for_builder(html_content: str) -> str:
     _apply_pagebuilder_layout_styles(soup)
 
     # Step 3: Build full HTML document with base styles + content for inlining.
-    base_styles = """<style>
-.migrated-blog-content {
+    base_styles = f"""<style>
+{PAGEBUILDER_BASE_CSS}
+.migrated-blog-content {{
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
                  "Helvetica Neue", Arial, "Noto Sans TC", "PingFang HK", sans-serif;
     font-size: 16px;
@@ -445,125 +588,11 @@ def process_html_for_builder(html_content: str) -> str:
     color: #333;
     max-width: 100%;
     overflow-x: hidden;
-}
-.migrated-blog-content img {
+}}
+.migrated-blog-content img {{
     max-width: 100%;
     height: auto;
-}
-table {
-    border-collapse: collapse;
-    margin-bottom: 16px;
-}
-table td, table th {
-    padding: 8px 12px;
-    vertical-align: top;
-}
-img {
-    max-width: 100%;
-    height: auto;
-}
-p { margin-bottom: 10px; line-height: 1.6; }
-h2 { margin: 20px 0 12px; }
-h3 { margin: 16px 0 10px; }
-a { color: #236fa1; }
-mark { padding: 2px 4px; }
-</style>"""
-
-    body_html = str(soup)
-    full_html = f"""<div class="migrated-blog-content">
-{base_styles}
-{body_html}
-</div>"""
-
-    # Step 4: Inline remaining CSS (class-based rules premailer CAN handle)
-    inlined = _inline_css(full_html)
-
-    # Clean up premailer artifacts
-    inlined_soup = BeautifulSoup(inlined, "html.parser")
-
-    # Final safety: remove any <style> or <script> tags that survived
-    for tag_name in ("style", "script", "noscript"):
-        for tag in inlined_soup.find_all(tag_name):
-            tag.decompose()
-
-    # Find our migrated-blog-content div
-    content_div = inlined_soup.find("div", class_="migrated-blog-content")
-    if content_div:
-        return str(content_div)
-
-    return str(inlined_soup)
-
-
-    """
-    Process scraped HTML so it renders correctly in Builder.io.
-
-    1. Sanitize: remove scripts, nav, footer, and other non-content elements
-    2. Rewrite: fix #html-body CSS selectors
-    3. Inline: convert all <style> rules to inline style= attributes
-    4. Wrap: in a styled container div
-    """
-    if not html_content:
-        return html_content
-
-    # Step 1: Sanitize — remove scripts and non-content elements
-    html_content = sanitize_html(html_content)
-
-    # Step 1b: Deduplicate content blocks (removes repeated sections/banners)
-    html_content, blocks_removed = deduplicate_content_blocks(html_content)
-    html_content, imgs_removed = deduplicate_similar_images(html_content)
-    if blocks_removed or imgs_removed:
-        logger.info("Deduplication: removed %d block(s), %d image(s)", blocks_removed, imgs_removed)
-
-    soup = BeautifulSoup(html_content, "html.parser")
-
-    # Step 2: Fix #html-body selectors in <style> blocks
-    for style_tag in soup.find_all("style"):
-        css_text = style_tag.string or ""
-        fixed_css = re.sub(r'#html-body\s+', '', css_text)
-        style_tag.string = fixed_css
-
-    # Step 2b: Apply Page Builder layout styles directly to DOM elements.
-    # This is critical because premailer cannot inline attribute selectors
-    # like [data-content-type="column-group"] or [data-pb-style="XYZ"].
-    # Without this step, all flex layouts, column widths, and backgrounds
-    # are lost when <style> tags are removed.
-    _apply_pagebuilder_layout_styles(soup)
-
-    # Step 3: Build full HTML document with base styles + content for inlining.
-    # Note: the PAGEBUILDER_BASE_CSS is now mostly applied directly above,
-    # but we keep class-based rules for premailer to handle.
-    base_styles = """<style>
-.migrated-blog-content {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-                 "Helvetica Neue", Arial, "Noto Sans TC", "PingFang HK", sans-serif;
-    font-size: 16px;
-    line-height: 1.7;
-    color: #333;
-    max-width: 100%;
-    overflow-x: hidden;
-}
-.migrated-blog-content img {
-    max-width: 100%;
-    height: auto;
-}
-/* Table styles */
-table {
-    border-collapse: collapse;
-    margin-bottom: 16px;
-}
-table td, table th {
-    padding: 8px 12px;
-    vertical-align: top;
-}
-img {
-    max-width: 100%;
-    height: auto;
-}
-p { margin-bottom: 10px; line-height: 1.6; }
-h2 { margin: 20px 0 12px; }
-h3 { margin: 16px 0 10px; }
-a { color: #236fa1; }
-mark { padding: 2px 4px; }
+}}
 </style>"""
 
     body_html = str(soup)
