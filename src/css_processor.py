@@ -129,13 +129,14 @@ mark { padding: 2px 4px; }
 
 /* -------------------------------------------------------
    Magento Product Listing (widget / products block)
-   Converts vertical list → responsive card grid
+   Converts vertical list → 4-column card grid matching
+   the original carousel's per-slide item count.
    ------------------------------------------------------- */
 .products.list.items,
 ol.product-items,
 ul.product-items {
     display: grid !important;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    grid-template-columns: repeat(4, 1fr);
     gap: 16px;
     list-style: none !important;
     padding: 0 !important;
@@ -326,13 +327,15 @@ ol.product-items li::before {
 }
 
 /* -------------------------------------------------------
-   Responsive: stack product grid to 2 cols on small screens
+   Responsive: adapt product grid to screen size
    ------------------------------------------------------- */
+@media (max-width: 900px) {
+    .products.list.items,
+    ol.product-items { grid-template-columns: repeat(3, 1fr) !important; }
+}
 @media (max-width: 600px) {
     .products.list.items,
-    ol.product-items {
-        grid-template-columns: repeat(2, 1fr) !important;
-    }
+    ol.product-items { grid-template-columns: repeat(2, 1fr) !important; }
 }
 """
 
@@ -660,9 +663,18 @@ def _apply_product_listing_layout(soup: BeautifulSoup) -> None:
     """
     # Target any <ol> or <ul> that has the Magento product-items class
     for container in soup.find_all(["ol", "ul"], class_=lambda c: c and "product-items" in c):
+        # Detect carousel column count from a parent data attribute if available
+        parent = container.parent
+        carousel_count = 4  # default: match original 4-per-row carousel
+        if parent:
+            for attr in ("data-pc-carousel-count", "data-carousel-count", "data-items-per-page"):
+                val = parent.get(attr) or parent.get(attr.replace("-", "_"), "")
+                if val:
+                    carousel_count = _safe_int(val, 4)
+                    break
         container["style"] = _merge_inline_style(
             container.get("style", ""),
-            "display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); "
+            f"display: grid; grid-template-columns: repeat({carousel_count}, 1fr); "
             "gap: 16px; list-style: none; padding: 0; margin: 0 0 24px 0;"
         )
         for item in container.find_all("li", class_=lambda c: c and "product-item" in c):

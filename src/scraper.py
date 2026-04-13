@@ -3,6 +3,7 @@ Web page scraper module for Magento websites.
 Supports:
 - Blog posts via Amasty Blog GraphQL API + HTML fallback
 - Static CMS pages via Magento cmsPage GraphQL + HTML fallback
+- Playwright-based full-page rendering (primary, when available)
 """
 
 import json
@@ -15,8 +16,255 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Optional Playwright dependency
+# ---------------------------------------------------------------------------
+PLAYWRIGHT_AVAILABLE = False
+try:
+    from playwright.sync_api import sync_playwright  # type: ignore
+    PLAYWRIGHT_AVAILABLE = True
+except Exception:
+    pass
 
-class BlogScraper:
+# ---------------------------------------------------------------------------
+# JavaScript to run inside Playwright: extracts the rendered content area
+# with computed layout styles applied as inline attributes so the output
+# is visually faithful without needing any external CSS file.
+# ---------------------------------------------------------------------------
+_PLAYWRIGHT_EXTRACTION_JS = r"""
+() => {
+    /* === 1. Strip chrome/navigation from DOM === */
+    const REMOVE = [
+        'script', 'noscript', 'link[rel]', 'meta',
+        'header', '.header', '.page-header', '.pwa-header',
+        'footer', '.footer', '.page-footer', '.pwa-footer',
+        'nav', '.navigation', '.nav',
+        '.breadcrumbs',
+        '.minicart-wrapper', '.block-search',
+        '.modal-popup', '.modal-slide', '.modals-wrapper',
+        '.loading-mask', '.loader',
+        '.cookie-notice', '.cookie-consent',
+        '#cookie-status',
+        '.page-title-wrapper',
+        '.sidebar', '.sidebar-main',
+    ];
+    REMOVE.forEach(sel => {
+        try { document.querySelectorAll(sel).forEach(el => el.remove()); } catch(e) {}
+    });
+
+    /* === 2. Find content area === */
+    const CANDIDATES = [
+        '.amblog-post-content',
+        '.cms-content',
+        '.post-content',
+        '.blog-post-content',
+        'article',
+        '.page-main-content',
+        '.page-main',
+        'main',
+    ];
+    let container = null;
+    for (const sel of CANDIDATES) {
+        try {
+            const el = document.querySelector(sel);
+            if (el && el.innerText.trim().length > 300) { container = el; break; }
+        } catch(e) {}
+    }
+    if (!container) return null;
+
+    /* === 3. Apply computed layout styles as inline attributes ===
+       We capture only properties that are:
+       (a) layout-critical (flex, grid, background, border)
+       (b) NOT the browser default (skip block, inline, transparent, etc.)
+       Width values are intentionally excluded because computed pixel widths
+       break responsiveness — the Page Builder inline styles already set them
+       as percentages via data-pb-style.
+    */
+    const LAYOUT_PROPS = [
+        'display',
+        'flex-direction', 'flex-wrap', 'flex-grow', 'flex-shrink', 'flex-basis',
+        'align-items', 'justify-content', 'align-self', 'align-content',
+        'grid-template-columns', 'grid-template-rows',
+        'gap', 'column-gap', 'row-gap',
+        'box-sizing', 'float', 'clear',
+        'overflow', 'overflow-x', 'overflow-y',
+        'background-color', 'background-image',
+        'border-radius',
+        'color', 'font-size', 'font-weight',
+        'text-align',
+    ];
+
+    const SKIP_VALUES = new Set([
+        '', 'none', 'initial', 'normal', 'auto',
+        'rgba(0, 0, 0, 0)', 'transparent',
+        'visible', 'content-box', 'static',
+        '0px', '0px 0px', '0px 0px 0px', '0px 0px 0px 0px',
+        'rgb(255, 255, 255)',   // white background (default page bg)
+        'rgb(0, 0, 0)',         // black text (default)
+        '16px',                  // default font-size
+    ]);
+    const SKIP_DISPLAY = new Set(['block', 'inline', 'table-row', 'table-cell',
+                                   'table', 'table-row-group', 'list-item']);
+
+    function applyLayoutStyles(el, depth) {
+        if (depth > 30 || !el || !el.tagName) return;
+        if (['SCRIPT','STYLE','LINK','META','HEAD','NOSCRIPT'].includes(el.tagName)) return;
+
+        const cs = window.getComputedStyle(el);
+        const existing = el.getAttribute('style') || '';
+        const decls = [];
+
+        for (const prop of LAYOUT_PROPS) {
+            if (existing.includes(prop + ':')) continue;  // already set inline
+            const val = cs.getPropertyValue(prop);
+            if (!val || SKIP_VALUES.has(val)) continue;
+            if (prop === 'display' && SKIP_DISPLAY.has(val)) continue;
+            if (prop === 'background-image' && val === 'none') continue;
+            decls.push(prop + ': ' + val);
+        }
+
+        if (decls.length) {
+            el.setAttribute('style',
+                (existing ? existing.replace(/;\s*$/, '') + '; ' : '') +
+                decls.join('; ') + ';'
+            );
+        }
+        Array.from(el.children).forEach(c => applyLayoutStyles(c, depth + 1));
+    }
+
+    applyLayoutStyles(container, 0);
+
+    /* === 4. Make all URLs absolute === */
+    container.querySelectorAll('img').forEach(img => {
+        try { img.setAttribute('src', img.src); } catch(e) {}
+        // also handle srcset
+        const ss = img.getAttribute('srcset');
+        if (ss) {
+            const absSrcset = ss.replace(/(\S+)(\s+\S+)?/g, (m, url, descr) => {
+                try { return new URL(url, location.href).href + (descr || ''); } catch(e) { return m; }
+            });
+            img.setAttribute('srcset', absSrcset);
+        }
+    });
+    container.querySelectorAll('[data-background-images]').forEach(el => {
+        // Make Magento background-image JSON URLs absolute (already handled by CSS processor)
+    });
+    container.querySelectorAll('a[href]').forEach(a => {
+        try {
+            const href = a.getAttribute('href');
+            if (href && !href.startsWith('javascript') && !href.startsWith('mailto') && !href.startsWith('#')) {
+                a.setAttribute('href', a.href);
+            }
+        } catch(e) {}
+    });
+
+    /* === 5. Collect metadata === */
+    const metaDesc = document.querySelector('meta[name="description"]');
+    const ogImage  = document.querySelector('meta[property="og:image"]');
+    const h1       = document.querySelector('h1');
+
+    return {
+        html: container.outerHTML,
+        title: document.title,
+        h1_title: h1 ? h1.innerText.trim() : '',
+        description: metaDesc ? metaDesc.getAttribute('content') : '',
+        thumbnail: ogImage   ? ogImage.getAttribute('content')   : '',
+    };
+}
+"""
+
+
+def _run_playwright_scrape(url: str, base_url: str = "") -> dict | None:
+    """
+    Open *url* in headless Chromium, wait for full JS rendering, then extract
+    the content area with computed layout styles applied as inline attributes.
+
+    Returns a page_data dict compatible with BlogScraper / StaticPageScraper
+    return values, or None if Playwright is unavailable or the scrape fails.
+    """
+    if not PLAYWRIGHT_AVAILABLE:
+        return None
+
+    logger.info("Playwright scraping: %s", url)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+            ctx = browser.new_context(
+                viewport={"width": 1440, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                locale="zh-HK",
+                extra_http_headers={"Accept-Language": "zh-HK,zh;q=0.9,en;q=0.8"},
+            )
+            page = ctx.new_page()
+
+            # Hide webdriver flag (basic anti-bot bypass)
+            page.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+
+            page.goto(url, wait_until="networkidle", timeout=60_000)
+            # Extra wait for lazy-loaded content (carousels, widgets)
+            page.wait_for_timeout(4000)
+
+            # Dismiss cookie consent if present
+            for dismiss_sel in [
+                ".cookie-notice .action-dismiss",
+                ".cookie-consent button",
+                "#cookie-accept",
+                ".accept-cookies",
+            ]:
+                try:
+                    page.click(dismiss_sel, timeout=1000)
+                    page.wait_for_timeout(500)
+                    break
+                except Exception:
+                    pass
+
+            # Scroll down to trigger lazy loading
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
+            page.wait_for_timeout(1500)
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(500)
+
+            result = page.evaluate(_PLAYWRIGHT_EXTRACTION_JS)
+            browser.close()
+
+        if not result or not result.get("html"):
+            logger.warning("Playwright returned empty content for %s", url)
+            return None
+
+        url_key = url.rstrip("/").split("/")[-1]
+        return {
+            "title": result.get("h1_title") or result.get("title", ""),
+            "html_content": result["html"],
+            "thumbnail": result.get("thumbnail", ""),
+            "meta_description": result.get("description", ""),
+            "meta_title": result.get("title", ""),
+            "categories": [],
+            "tags": [],
+            "url_key": url_key,
+            "published_at": "",
+            "images": [],
+            "source": "playwright",
+            "page_type": "blog",
+        }
+
+    except Exception as exc:
+        logger.warning("Playwright scrape failed for %s: %s", url, exc)
+        return None
+
+
     """Scrapes blog content from a Magento website with Amasty Blog."""
 
     def __init__(self, base_url: str, blog_path: str = "/blog/"):
@@ -29,16 +277,32 @@ class BlogScraper:
         })
         self.graphql_url = f"{self.base_url}/graphql"
 
-    def fetch_post_by_url_key(self, url_key: str) -> dict:
-        """Fetch a single blog post by its URL key. Tries GraphQL first, falls back to HTML."""
-        logger.info(f"Fetching blog post: {url_key}")
+    def fetch_post_by_url_key(self, url_key: str, use_playwright: bool = True) -> dict:
+        """Fetch a single blog post by its URL key.
 
-        # Try GraphQL first
+        Priority:
+        1. Playwright (full rendering with computed styles) — highest fidelity
+        2. GraphQL (structured data) — fast but loses Page Builder CSS
+        3. HTML scraping — last resort
+        """
+        logger.info(f"Fetching blog post: {url_key}")
+        full_url = f"{self.base_url}{self.blog_path}{url_key}"
+
+        # 1. Try Playwright (gets computed styles — best layout fidelity)
+        if use_playwright and PLAYWRIGHT_AVAILABLE:
+            pw_result = _run_playwright_scrape(full_url, base_url=self.base_url)
+            if pw_result and pw_result.get("html_content"):
+                pw_result["page_type"] = "blog"
+                pw_result["url_key"] = url_key
+                logger.info("Playwright scrape succeeded for %s", url_key)
+                return pw_result
+
+        # 2. Try GraphQL
         post = self._fetch_via_graphql(url_key)
         if post:
             return post
 
-        # Fallback to HTML scraping
+        # 3. Fallback to HTML scraping
         logger.info(f"GraphQL failed for {url_key}, falling back to HTML scraping")
         return self._fetch_via_html(url_key)
 
@@ -360,23 +624,33 @@ class StaticPageScraper:
         })
         self.graphql_url = f"{self.base_url}/graphql"
 
-    def fetch_page_by_url(self, page_url: str, url_key: str = "") -> dict:
-        """
-        Fetch a static page. Tries CMS GraphQL first, then falls back to HTML scraping.
+    def fetch_page_by_url(self, page_url: str, url_key: str = "", use_playwright: bool = True) -> dict:
+        """Fetch a static page.
 
-        Args:
-            page_url: Full URL of the page to scrape
-            url_key: URL key/identifier for this page
+        Priority:
+        1. Playwright (full rendering with computed styles) — best fidelity
+        2. CMS GraphQL — structured data but loses Page Builder CSS
+        3. HTML scraping — last resort
         """
         logger.info(f"Fetching static page: {url_key or page_url}")
 
-        # Try GraphQL cmsPage first using the url_key
+        # 1. Try Playwright
+        if use_playwright and PLAYWRIGHT_AVAILABLE and page_url:
+            pw_result = _run_playwright_scrape(page_url, base_url=self.base_url)
+            if pw_result and pw_result.get("html_content"):
+                pw_result["page_type"] = "static"
+                pw_result["url_key"] = url_key or pw_result.get("url_key", "")
+                pw_result["primary_url"] = page_url
+                logger.info("Playwright scrape succeeded for %s", url_key or page_url)
+                return pw_result
+
+        # 2. Try GraphQL cmsPage
         if url_key:
             result = self._fetch_via_cms_graphql(url_key)
             if result and not result.get("error"):
                 return result
 
-        # Fallback to HTML scraping
+        # 3. Fallback to HTML scraping
         logger.info(f"GraphQL failed for {url_key}, falling back to HTML scraping")
         return self._fetch_via_html(page_url, url_key)
 

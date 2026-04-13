@@ -1188,30 +1188,71 @@ with tab_visual_qa:
         qa_post = st.session_state["qa_post"]
         saved_url = st.session_state.get("qa_url", qa_url)
 
+        # ----------------------------------------------------------------
+        # IMPORTANT: we use the RAW scraped HTML (not the CSS-processed
+        # version) so that:
+        #  1. AI comparison can target actual CSS class names
+        #  2. AI-suggested CSS fixes override inline styles via !important
+        #  3. The before/after preview reflects real class-based styling
+        #
+        # generate_blog_preview_html() runs process_html_for_builder()
+        # which inlines everything — AI class-based fixes can't win against
+        # inline styles without !important, and even then it's unreliable.
+        # ----------------------------------------------------------------
+        raw_html = qa_post.get("html_content", "")
+        source_base = source_url.rstrip("/")
+
+        def _raw_preview_page(html_body: str, extra_css: str = "") -> str:
+            """Wrap raw HTML in a minimal standalone page with <base href>."""
+            return f"""<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<base href="{source_base}/">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",
+     Arial,"Noto Sans TC",sans-serif;line-height:1.7;color:#333;background:#fff;padding:16px}}
+img{{max-width:100%;height:auto}} a{{color:#236fa1}} p{{margin-bottom:10px}}
+</style>
+{extra_css}
+</head>
+<body>
+{html_body}
+</body>
+</html>"""
+
+        scraped_preview_html = _raw_preview_page(raw_html)
+
         st.divider()
         st.markdown("### Side-by-Side Preview")
+        st.info(
+            "**Left**: Original website (open link if iframe is blocked by the site)  \n"
+            "**Right**: Scraped raw HTML rendered with `<base href>` so images load from source"
+        )
 
         col_orig, col_scraped = st.columns(2)
 
         with col_orig:
             st.markdown("**Original Website**")
-            st.markdown(f"[Open in new tab]({saved_url})")
-            # Embed original in an iframe (may be blocked by X-Frame-Options)
+            st.markdown(f"[Open in new tab ↗]({saved_url})")
             orig_iframe = f"""
             <iframe src="{saved_url}"
                     style="width:100%;height:700px;border:1px solid #ddd;border-radius:6px;"
-                    sandbox="allow-same-origin allow-scripts">
+                    sandbox="allow-same-origin allow-scripts allow-popups">
             </iframe>
-            <p style="font-size:12px;color:#999;margin-top:4px;">
-              If the page blocks iframes, use the link above to open it directly.
+            <p style="font-size:11px;color:#999;margin-top:4px;">
+              If blank, the site blocks iframes — use the link above.
             </p>
             """
             components.html(orig_iframe, height=730)
 
         with col_scraped:
-            st.markdown("**Scraped / Processed Version**")
-            scraped_html = generate_blog_preview_html(qa_post, base_url=source_url)
-            components.html(scraped_html, height=700, scrolling=True)
+            st.markdown("**Scraped Version (raw HTML)**")
+            source_info = qa_post.get("source", "unknown")
+            st.caption(f"Source: {source_info} — images resolved via base URL")
+            components.html(scraped_preview_html, height=700, scrolling=True)
 
         # ── AI Comparison ───────────────────────────────────────────────
         st.divider()
@@ -1232,16 +1273,21 @@ with tab_visual_qa:
             with st.spinner("Running AI visual comparison — this may take 30–60 seconds …"):
                 try:
                     qa_agent = VisualQA(openai_api_key=openai_api_key, model=openai_model)
+                    # Compare using the raw preview page (preserves CSS classes)
                     ai_result = qa_agent.compare(
                         original_url=saved_url,
-                        scraped_html=scraped_html,
+                        scraped_html=scraped_preview_html,
                         source_base_url=source_url,
                         use_screenshots=PLAYWRIGHT_AVAILABLE,
                     )
                     st.session_state["qa_ai_result"] = ai_result
                     st.session_state.pop("qa_fixed_html", None)
-                    method_label = {"vision": "screenshot comparison", "text": "HTML text comparison", "none": "unavailable"}.get(ai_result.get("method", "none"), "unknown")
-                    st.success(f"AI comparison complete (method: {method_label})")
+                    method_label = {
+                        "vision": "screenshot comparison (Playwright + GPT-4o Vision)",
+                        "text": "HTML text comparison (GPT-4o)",
+                        "none": "unavailable",
+                    }.get(ai_result.get("method", "none"), "unknown")
+                    st.success(f"AI comparison complete — method: {method_label}")
                 except Exception as e:
                     st.error(f"AI comparison failed: {e}")
 
@@ -1252,10 +1298,9 @@ with tab_visual_qa:
             if ai_result.get("error"):
                 st.error(f"AI error: {ai_result['error']}")
             else:
-                # Summary
                 st.markdown(f"**Summary:** {ai_result.get('summary', 'No summary')}")
 
-                # Screenshots side by side (if vision mode)
+                # Screenshots (if vision mode ran)
                 if "orig_screenshot" in ai_result and "scraped_screenshot" in ai_result:
                     sc_col1, sc_col2 = st.columns(2)
                     with sc_col1:
@@ -1265,66 +1310,92 @@ with tab_visual_qa:
                         st.markdown("**Scraped Screenshot**")
                         st.image(ai_result["scraped_screenshot"], use_container_width=True)
 
-                # Differences table
                 differences = ai_result.get("differences", [])
                 if differences:
                     st.markdown(f"### Identified Issues ({len(differences)})")
                     for i, diff in enumerate(differences, 1):
                         severity = diff.get("severity", "medium")
-                        color = {"high": "red", "medium": "orange", "low": "blue"}.get(severity, "gray")
                         with st.expander(
                             f"[{severity.upper()}] {diff.get('element', f'Issue {i}')}",
                             expanded=(severity == "high"),
                         ):
                             st.markdown(f"**Issue:** {diff.get('issue', '')}")
-                            st.code(diff.get("fix", ""), language="css")
+                            if diff.get("fix"):
+                                st.code(diff["fix"], language="css")
                 else:
-                    st.success("No significant differences found! The pages look identical.")
+                    st.success("No significant differences found!")
 
-                # Generated CSS
                 additional_css = ai_result.get("additional_css", "")
                 if additional_css:
-                    with st.expander("Generated CSS Fix (full block)", expanded=False):
+                    with st.expander("Full AI-generated CSS fix block", expanded=False):
                         st.code(additional_css, language="css")
+                    # Allow manual editing
+                    edited_css = st.text_area(
+                        "Edit CSS before applying (optional)",
+                        value=additional_css,
+                        height=200,
+                        key="qa_css_editor",
+                    )
+                else:
+                    edited_css = ""
 
-                # Apply fixes
                 st.divider()
                 apply_fixes_btn = st.button(
                     "Apply AI Fixes & Preview",
                     type="primary",
                     key="qa_apply_fixes_btn",
-                    disabled=not additional_css,
+                    disabled=not (additional_css or edited_css),
                 )
 
-                if apply_fixes_btn and additional_css:
+                if apply_fixes_btn:
+                    css_to_apply = edited_css or additional_css
                     qa_agent = VisualQA(openai_api_key=openai_api_key, model=openai_model)
-                    fixed_html = qa_agent.apply_fixes(scraped_html, additional_css)
-                    st.session_state["qa_fixed_html"] = fixed_html
-                    st.success("CSS fixes applied!")
+                    # Apply fixes to the RAW HTML body (not the wrapped page)
+                    # The fixes use !important so they override any existing inline styles
+                    fixed_raw_body = qa_agent.apply_fixes(raw_html, css_to_apply, force_important=True)
+                    # Wrap in a preview page
+                    fixed_preview_html = _raw_preview_page(fixed_raw_body)
+                    st.session_state["qa_fixed_html"] = fixed_preview_html
+                    st.session_state["qa_fixed_raw_body"] = fixed_raw_body
+                    st.session_state["qa_applied_css"] = css_to_apply
+                    st.success("CSS fixes applied with !important (overrides inline styles)!")
                     st.rerun()
 
         # ── Fixed version preview & upload ──────────────────────────────
         if st.session_state.get("qa_fixed_html"):
             fixed_html = st.session_state["qa_fixed_html"]
+            fixed_raw_body = st.session_state.get("qa_fixed_raw_body", "")
             st.divider()
             st.markdown("### Fixed Version Preview")
 
             fix_col1, fix_col2 = st.columns(2)
             with fix_col1:
-                st.markdown("**Before (scraped)**")
-                components.html(scraped_html, height=600, scrolling=True)
+                st.markdown("**Before (scraped, no fixes)**")
+                components.html(scraped_preview_html, height=700, scrolling=True)
             with fix_col2:
                 st.markdown("**After (AI-fixed)**")
-                components.html(fixed_html, height=600, scrolling=True)
+                components.html(fixed_html, height=700, scrolling=True)
 
-            # Download fixed HTML
-            st.download_button(
-                "Download Fixed HTML",
-                data=fixed_html,
-                file_name=f"fixed_{qa_post.get('url_key', 'page')}.html",
-                mime="text/html",
-                key="qa_download_fixed",
-            )
+            dl_col1, dl_col2 = st.columns(2)
+            with dl_col1:
+                st.download_button(
+                    "Download Fixed HTML",
+                    data=fixed_html,
+                    file_name=f"fixed_{qa_post.get('url_key', 'page')}.html",
+                    mime="text/html",
+                    key="qa_download_fixed",
+                )
+            with dl_col2:
+                # Also offer the Builder.io-ready version
+                from src.css_processor import process_html_for_builder as _pfb
+                builder_ready = _pfb(fixed_raw_body or raw_html)
+                st.download_button(
+                    "Download Builder.io-ready HTML",
+                    data=builder_ready,
+                    file_name=f"builder_{qa_post.get('url_key', 'page')}.html",
+                    mime="text/html",
+                    key="qa_download_builder",
+                )
 
             # Upload to Builder.io
             st.divider()
@@ -1347,18 +1418,11 @@ with tab_visual_qa:
                 if upload_fixed_btn:
                     with st.spinner("Uploading to Builder.io …"):
                         try:
-                            # Re-process through migration agent but inject the fixed HTML
-                            from src.css_processor import process_html_for_builder
-                            from bs4 import BeautifulSoup as _BS
-
-                            # Extract just the body content from fixed_html
-                            _fsoup = _BS(fixed_html, "html.parser")
-                            _body = _fsoup.find("body")
-                            fixed_content = str(_body) if _body else fixed_html
-
-                            # Override the post's html_content with the fixed version
-                            upload_post = dict(qa_post)
-                            upload_post["html_content"] = fixed_content
+                            # Use the fixed raw body as html_override.
+                            # _migrate_single_page will run process_html_for_builder()
+                            # on it during the upload step, which will inline the AI CSS
+                            # (since it's in <style> tags) before removing them.
+                            upload_content = fixed_raw_body or raw_html
 
                             agent = MigrationAgent(
                                 source_base_url=source_url,
@@ -1380,7 +1444,7 @@ with tab_visual_qa:
                                 publish=publish_fixed,
                                 skip_existing=False,
                                 dry_run=False,
-                                html_override=fixed_content,
+                                html_override=upload_content,
                             )
 
                             if result.get("status") in ("published_by_agent", "uploaded"):
@@ -1406,7 +1470,7 @@ with tab_visual_qa:
                         qa_agent = VisualQA(openai_api_key=openai_api_key, model=openai_model)
                         recheck_result = qa_agent.compare(
                             original_url=saved_url,
-                            scraped_html=fixed_html,
+                            scraped_html=fixed_html,  # compare the full fixed page
                             source_base_url=source_url,
                             use_screenshots=PLAYWRIGHT_AVAILABLE,
                         )

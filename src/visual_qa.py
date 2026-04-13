@@ -57,19 +57,37 @@ def _screenshot_url(url: str, viewport_width: int = 1440, viewport_height: int =
         return None
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
             ctx = browser.new_context(
                 viewport={"width": viewport_width, "height": viewport_height},
                 user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0.0.0 Safari/537.36"
                 ),
+                locale="zh-HK",
+                extra_http_headers={"Accept-Language": "zh-HK,zh;q=0.9,en;q=0.8"},
             )
             page = ctx.new_page()
-            page.goto(url, wait_until="networkidle", timeout=45_000)
-            # Wait a bit for lazy-loaded images
-            page.wait_for_timeout(2000)
+            # Hide automation flag
+            page.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+            page.goto(url, wait_until="networkidle", timeout=60_000)
+            # Wait for lazy-loaded images and carousel JS to finish
+            page.wait_for_timeout(4000)
+            # Scroll to trigger lazy loading then back to top
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
+            page.wait_for_timeout(1500)
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(500)
             data = page.screenshot(full_page=True, type="png")
             browser.close()
             return data
@@ -125,8 +143,13 @@ def _screenshot_html(
         return None
 
 
-def _crop_screenshot(png: bytes, max_height_px: int = 4000) -> bytes:
-    """Crop a tall screenshot to *max_height_px* to stay within API limits."""
+def _crop_screenshot(png: bytes, max_height_px: int = 12000) -> bytes:
+    """Scale down very tall screenshots to keep them within OpenAI API size limits.
+
+    We no longer hard-crop at 4000px (which was cutting off the product section).
+    Instead we allow up to 12 000 px height, and only SCALE DOWN (not crop) if
+    the image is taller than that, so no content is lost.
+    """
     try:
         from PIL import Image  # type: ignore
         import io
@@ -134,9 +157,12 @@ def _crop_screenshot(png: bytes, max_height_px: int = 4000) -> bytes:
         img = Image.open(io.BytesIO(png))
         w, h = img.size
         if h > max_height_px:
-            img = img.crop((0, 0, w, max_height_px))
+            # Scale proportionally so nothing is cropped
+            ratio = max_height_px / h
+            new_w = max(1, int(w * ratio))
+            img = img.resize((new_w, max_height_px), Image.LANCZOS)
         buf = io.BytesIO()
-        img.save(buf, format="PNG")
+        img.save(buf, format="PNG", optimize=True)
         return buf.getvalue()
     except Exception:
         return png
@@ -291,22 +317,47 @@ def _call_openai_text(
 # CSS fix application
 # ---------------------------------------------------------------------------
 
-def apply_css_fixes(html: str, additional_css: str) -> str:
-    """Inject *additional_css* into *html* so the fixes take effect."""
+def apply_css_fixes(html: str, additional_css: str, force_important: bool = True) -> str:
+    """Inject *additional_css* into *html* so the fixes take effect.
+
+    Args:
+        force_important: When True (default), append !important to every CSS
+            declaration that doesn't already have it.  This is necessary because
+            the processed HTML uses premailer-inlined styles (``style=""``
+            attributes) which have higher specificity than class selectors in a
+            ``<style>`` block.  Adding !important overrides them.
+    """
     if not additional_css or not additional_css.strip():
         return html
 
     # Strip wrapping <style>…</style> if the model returned them
     css_only = re.sub(r"^\s*<style[^>]*>", "", additional_css.strip(), flags=re.IGNORECASE)
     css_only = re.sub(r"</style>\s*$", "", css_only.strip(), flags=re.IGNORECASE)
+    css_only = css_only.strip()
 
-    style_block = f"<style>\n/* AI Visual QA fixes */\n{css_only.strip()}\n</style>\n"
+    if force_important:
+        # Add !important to every property declaration that lacks it.
+        # Pattern: matches "property: value;" (without !important)
+        css_only = re.sub(
+            r'(:\s*[^;{}]+?)(\s*;)',
+            lambda m: m.group(1) + " !important" + m.group(2)
+            if "!important" not in m.group(1)
+            else m.group(0),
+            css_only,
+        )
+
+    style_block = (
+        "<style>\n"
+        "/* AI Visual QA fixes — !important overrides inline styles */\n"
+        f"{css_only}\n"
+        "</style>\n"
+    )
 
     soup = BeautifulSoup(html, "html.parser")
-    # Prefer inserting at the start of an existing <head> or <body>; otherwise prepend
+    # Insert at the END of <head> so it wins specificity battles
     head = soup.find("head")
     if head:
-        head.insert(len(head.contents), BeautifulSoup(style_block, "html.parser"))
+        head.append(BeautifulSoup(style_block, "html.parser"))
     else:
         body = soup.find("body")
         if body:
