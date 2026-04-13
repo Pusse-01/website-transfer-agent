@@ -62,7 +62,8 @@ class BuilderClient:
         url = f"{self.CDN_BASE_URL}/{model}?apiKey={read_key}{sep}{extra_params}"
         return url
 
-    def create_blog_entry(self, blog_data: dict, publish: bool = False, existing_entry_id: str = None) -> dict:
+    def create_blog_entry(self, blog_data: dict, publish: bool = False, existing_entry_id: str = None) -> dict:  # noqa: E501
+        pre_processed = bool(blog_data.get("_html_already_processed"))
         """
         Create or update a blog article entry in Builder.io under the 'blog-post' model.
 
@@ -94,6 +95,7 @@ class BuilderClient:
         blocks = self._html_to_builder_blocks(
             blog_data.get("html_content", ""),
             wide_layout=False,
+            skip_processing=pre_processed,
         )
 
         entry = {
@@ -151,10 +153,12 @@ class BuilderClient:
         url_key = page_data.get("url_key", "")
         # Static pages go directly under root path
         url_path = f"/{url_key}" if url_key else "/"
+        pre_processed = bool(page_data.get("_html_already_processed"))
 
         blocks = self._html_to_builder_blocks(
             page_data.get("html_content", ""),
             wide_layout=True,
+            skip_processing=pre_processed,
         )
 
         entry = {
@@ -254,7 +258,8 @@ class BuilderClient:
         self._last_request_time = time.time()
         self._request_count += 1
 
-    def _html_to_builder_blocks(self, html_content: str, wide_layout: bool = False) -> list[dict]:
+    def _html_to_builder_blocks(self, html_content: str, wide_layout: bool = False,
+                                skip_processing: bool = False) -> list[dict]:
         """
         Convert HTML content to Builder.io block format.
 
@@ -262,12 +267,21 @@ class BuilderClient:
         layout while still being editable in Builder.io's visual editor.
         Users can drag/drop additional blocks around the migrated content,
         and edit text within Custom Code blocks.
+
+        Args:
+            html_content: Raw or processed HTML to embed.
+            wide_layout: Whether to use the wide static-page section layout.
+            skip_processing: Set True when the HTML has already been passed
+                through process_html_for_builder (e.g. by the LLM layout
+                fixer) so we don't rerun sanitization on the corrected output.
         """
         if not html_content:
             return []
 
-        # Process HTML to fix Magento Page Builder CSS and add base styles
-        html_content = process_html_for_builder(html_content)
+        # Process HTML to fix Magento Page Builder CSS and add base styles.
+        # Skip when the HTML has already been processed upstream.
+        if not skip_processing:
+            html_content = process_html_for_builder(html_content)
         section_max_width = 1440 if wide_layout else 900
         section_padding = "0px" if wide_layout else "20px"
         custom_code_margin_top = "0px" if wide_layout else "20px"

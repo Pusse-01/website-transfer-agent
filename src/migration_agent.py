@@ -26,6 +26,8 @@ from .excel_reader import read_blog_list, read_static_page_list, detect_excel_ty
 from .migration_logger import MigrationLogger
 from .visual_verifier import VisualVerifier, run_visual_verification
 from .deduplication import deduplicate_content_blocks, deduplicate_similar_images
+from .css_processor import process_html_for_builder
+from .llm_layout_fixer import fix_layout as llm_fix_layout, is_enabled as llm_fix_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -439,6 +441,40 @@ class MigrationAgent:
                 if blocks_removed or imgs_removed:
                     self.mlog.info(url_key, page_type, "transform",
                                    f"Deduplication: removed {blocks_removed} block(s), {imgs_removed} image(s)")
+
+            # Step 4c: LLM-assisted layout verification BEFORE upload.
+            # Render the processed HTML the same way Builder.io will, compare
+            # it to a screenshot of the live source, and let an OpenAI vision
+            # model rewrite the HTML if the layout has drifted. This is a
+            # best-effort step — if OPENAI_API_KEY is unset or the call fails,
+            # the pipeline falls through and uploads the unmodified HTML.
+            if not dry_run and llm_fix_enabled():
+                try:
+                    self.mlog.info(url_key, page_type, "transform",
+                                   "Running LLM-assisted layout fix against original page...")
+                    # Feed the LLM the FULLY-processed HTML (the exact string
+                    # that Builder.io will render), not the raw scraped HTML.
+                    processed_for_builder = process_html_for_builder(
+                        page_data["html_content"]
+                    )
+                    fixed_html = llm_fix_layout(
+                        original_url=primary_url,
+                        current_html=processed_for_builder,
+                        url_key=url_key,
+                    )
+                    if fixed_html and fixed_html != processed_for_builder:
+                        page_data["html_content"] = fixed_html
+                        # Mark so the BuilderClient skips its own CSS pass
+                        # (the fixer already returned Builder-ready HTML).
+                        page_data["_html_already_processed"] = True
+                        self.mlog.info(url_key, page_type, "transform",
+                                       "LLM layout fix applied to HTML before upload")
+                    else:
+                        self.mlog.info(url_key, page_type, "transform",
+                                       "LLM layout fix returned no changes")
+                except Exception as e:
+                    self.mlog.warning(url_key, page_type, "transform",
+                                     f"LLM layout fix skipped (non-critical): {e}")
 
             # Step 5: Upload to Builder.io
             if dry_run:

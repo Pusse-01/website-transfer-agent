@@ -335,6 +335,55 @@ def _merge_inline_style(existing: str, new_declarations: str) -> str:
     return existing + ";"
 
 
+_POSITION_BREAKS = re.compile(r'position\s*:\s*(?:sticky|fixed|absolute)', re.IGNORECASE)
+
+
+def _strip_dangerous_positioning(soup: BeautifulSoup) -> None:
+    """Remove position: sticky/fixed/absolute from inline styles and <style> blocks.
+
+    Magento Page Builder sometimes emits sticky TOCs or fixed banners. Inside
+    Builder.io's Custom Code container these escape the content flow and
+    float above unrelated sections, making the layout look as if two different
+    parts of the page are rendered side-by-side.
+    """
+    for el in soup.find_all(style=True):
+        style = el.get("style", "") or ""
+        if _POSITION_BREAKS.search(style):
+            new_style = re.sub(
+                r'position\s*:\s*(sticky|fixed|absolute)\s*;?', "",
+                style, flags=re.IGNORECASE,
+            ).strip()
+            if new_style:
+                el["style"] = new_style
+            else:
+                del el["style"]
+
+    for style_tag in soup.find_all("style"):
+        css_text = style_tag.string or ""
+        if _POSITION_BREAKS.search(css_text):
+            style_tag.string = re.sub(
+                r'position\s*:\s*(sticky|fixed|absolute)\s*;?', "",
+                css_text, flags=re.IGNORECASE,
+            )
+
+
+_WIDTH_IN_DECL = re.compile(
+    r'(?:^|;)\s*width\s*:\s*([^;]+?)\s*(?:;|$)',
+    re.IGNORECASE,
+)
+
+
+def _extract_width_from_style(style: str) -> str | None:
+    """Return the width declaration value from an inline style, or None."""
+    if not style:
+        return None
+    match = _WIDTH_IN_DECL.search(style)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
 def _set_inline_style_property(existing: str, prop: str, value: str) -> str:
     """Set or replace a single inline style property."""
     prop_key = prop.strip().lower()
@@ -481,45 +530,57 @@ def _apply_pagebuilder_layout_styles(soup: BeautifulSoup) -> None:
     # --- Part 2: Apply base layout styles to data-content-type elements ---
     # These are attribute-selector rules that premailer can't handle
 
-    # Row layout
+    # Row layout — force full-width centred rows so content doesn't collapse
+    # to a skinny left-aligned column inside Builder.io's Custom Code container.
     for el in soup.find_all(attrs={"data-content-type": "row"}):
-        base = "box-sizing: border-box"
-        if el.get("data-appearance") == "contained":
-            base += "; max-width: 100%; margin: 0 auto"
+        base = "box-sizing: border-box; width: 100%; max-width: 100%; margin-left: auto; margin-right: auto"
         el["style"] = _merge_inline_style(el.get("style", ""), base)
-        # Inner wrapper
+        # Inner wrapper — same full-width treatment
         inner = el.find(attrs={"data-element": "inner"})
         if inner:
-            inner["style"] = _merge_inline_style(inner.get("style", ""), "max-width: 100%")
+            inner["style"] = _merge_inline_style(
+                inner.get("style", ""),
+                "width: 100%; max-width: 100%; margin-left: auto; margin-right: auto; box-sizing: border-box",
+            )
 
     # Column group — critical for side-by-side layout
     for el in soup.find_all(attrs={"data-content-type": "column-group"}):
         el["style"] = _merge_inline_style(
             el.get("style", ""),
-            "display: flex; flex-wrap: wrap; width: 100%"
+            "display: flex; flex-wrap: wrap; width: 100%; align-items: stretch"
         )
 
-    # Column — individual columns within a group
+    # Column — individual columns within a group. Promote any width: X% into
+    # a flex-basis so the percentage width is honoured inside the flex row
+    # instead of collapsing to content-width.
     for el in soup.find_all(attrs={"data-content-type": "column"}):
-        el["style"] = _merge_inline_style(
-            el.get("style", ""),
-            "box-sizing: border-box; display: flex; flex-direction: column"
-        )
+        current = el.get("style", "")
+        width_value = _extract_width_from_style(current)
+        base = "box-sizing: border-box; display: flex; flex-direction: column"
+        if width_value:
+            base += f"; flex: 0 0 {width_value}; max-width: {width_value}"
+        else:
+            base += "; flex: 1 1 auto"
+        el["style"] = _merge_inline_style(current, base)
 
     # pagebuilder-column-group / column-line classes (flex containers)
     for class_name in ("pagebuilder-column-group", "pagebuilder-column-line"):
         for el in soup.find_all(class_=class_name):
             el["style"] = _merge_inline_style(
                 el.get("style", ""),
-                "display: flex; flex-wrap: wrap; width: 100%"
+                "display: flex; flex-wrap: wrap; width: 100%; align-items: stretch"
             )
 
-    # pagebuilder-column class (individual columns)
+    # pagebuilder-column class (individual columns) — same flex-basis promotion
     for el in soup.find_all(class_="pagebuilder-column"):
-        el["style"] = _merge_inline_style(
-            el.get("style", ""),
-            "box-sizing: border-box; display: flex; flex-direction: column"
-        )
+        current = el.get("style", "")
+        width_value = _extract_width_from_style(current)
+        base = "box-sizing: border-box; display: flex; flex-direction: column"
+        if width_value:
+            base += f"; flex: 0 0 {width_value}; max-width: {width_value}"
+        else:
+            base += "; flex: 1 1 auto"
+        el["style"] = _merge_inline_style(current, base)
 
     # Button groups
     for el in soup.find_all(attrs={"data-content-type": "button-item"}):
@@ -539,6 +600,7 @@ def _apply_pagebuilder_layout_styles(soup: BeautifulSoup) -> None:
 
     _apply_background_image_styles(soup)
     _apply_slider_fallback_layout(soup)
+    _strip_dangerous_positioning(soup)
 
 
 def process_html_for_builder(html_content: str) -> str:
@@ -586,8 +648,17 @@ def process_html_for_builder(html_content: str) -> str:
     font-size: 16px;
     line-height: 1.7;
     color: #333;
+    width: 100%;
     max-width: 100%;
-    overflow-x: hidden;
+    margin: 0 auto;
+    box-sizing: border-box;
+}}
+.migrated-blog-content [data-content-type="row"],
+.migrated-blog-content [data-content-type="row"] > [data-element="inner"] {{
+    width: 100%;
+    max-width: 100%;
+    margin-left: auto;
+    margin-right: auto;
 }}
 .migrated-blog-content img {{
     max-width: 100%;
