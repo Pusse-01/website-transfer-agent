@@ -33,28 +33,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 _PLAYWRIGHT_EXTRACTION_JS = r"""
 () => {
-    /* === 1. Strip chrome/navigation from DOM === */
-    const REMOVE = [
-        'script', 'noscript', 'link[rel]', 'meta',
-        'header', '.header', '.page-header', '.pwa-header',
-        'footer', '.footer', '.page-footer', '.pwa-footer',
-        'nav', '.navigation', '.nav',
-        '.breadcrumbs',
-        '.minicart-wrapper', '.block-search',
-        '.modal-popup', '.modal-slide', '.modals-wrapper',
-        '.loading-mask', '.loader',
-        '.cookie-notice', '.cookie-consent',
-        '#cookie-status',
-        '.page-title-wrapper',
-        '.sidebar', '.sidebar-main',
-        /* Slick navigation — these become raw text "Previous"/"Next" without CSS */
-        '.slick-prev', '.slick-next', '.slick-arrow', '.slick-dots',
-    ];
-    REMOVE.forEach(sel => {
-        try { document.querySelectorAll(sel).forEach(el => el.remove()); } catch(e) {}
-    });
-
-    /* === 2. Find content area === */
+    /* === 1. Find content area FIRST (before we remove anything) === */
     const CANDIDATES = [
         '.amblog-post-content',
         '.cms-content',
@@ -73,6 +52,120 @@ _PLAYWRIGHT_EXTRACTION_JS = r"""
         } catch(e) {}
     }
     if (!container) return null;
+
+    /* === 1.5 Capture ALL relevant CSS rules BEFORE stripping chrome ===
+       The live site has ~50 external stylesheets and many inline <style> blocks.
+       We walk every rule in every accessible stylesheet and KEEP only the rules
+       whose selector actually matches an element in our container (or @keyframes
+       / @font-face rules which we always keep).  This gives the migrated HTML
+       the EXACT same CSS the original page uses — no reconstruction needed.
+    */
+    const collectedCSS = [];
+    const collectedFontFaces = [];
+    const collectedKeyframes = new Map();
+
+    function selectorMatchesContainer(selector) {
+        /* Strip pseudo-classes/elements that break querySelectorAll */
+        const cleaned = selector
+            .replace(/::?(?:hover|focus|active|visited|before|after|placeholder|selection|first-line|first-letter|-[a-z-]+)(?:\([^)]*\))?/gi, '')
+            .replace(/:(?:not|is|where|has)\([^)]*\)/gi, '')
+            .trim();
+        if (!cleaned) return true;  /* keep — e.g. universal or complex selector */
+        try {
+            /* Match if ANY part of the selector list matches */
+            const parts = cleaned.split(',').map(s => s.trim()).filter(Boolean);
+            for (const p of parts) {
+                try {
+                    if (container.matches(p)) return true;
+                    if (container.querySelector(p)) return true;
+                } catch(e) { /* invalid selector — keep to be safe */ return true; }
+            }
+            return false;
+        } catch(e) { return true; }
+    }
+
+    function processRules(rules) {
+        if (!rules) return;
+        for (const rule of Array.from(rules)) {
+            try {
+                /* CSSStyleRule */
+                if (rule.type === 1 && rule.selectorText) {
+                    if (selectorMatchesContainer(rule.selectorText)) {
+                        collectedCSS.push(rule.cssText);
+                    }
+                }
+                /* CSSMediaRule — recurse */
+                else if (rule.type === 4 && rule.cssRules) {
+                    const inner = [];
+                    for (const r of Array.from(rule.cssRules)) {
+                        if (r.type === 1 && r.selectorText && selectorMatchesContainer(r.selectorText)) {
+                            inner.push(r.cssText);
+                        }
+                    }
+                    if (inner.length) {
+                        collectedCSS.push('@media ' + rule.conditionText + ' {\n' + inner.join('\n') + '\n}');
+                    }
+                }
+                /* CSSSupportsRule — recurse */
+                else if (rule.type === 12 && rule.cssRules) {
+                    const inner = [];
+                    for (const r of Array.from(rule.cssRules)) {
+                        if (r.type === 1 && r.selectorText && selectorMatchesContainer(r.selectorText)) {
+                            inner.push(r.cssText);
+                        }
+                    }
+                    if (inner.length) {
+                        collectedCSS.push('@supports ' + rule.conditionText + ' {\n' + inner.join('\n') + '\n}');
+                    }
+                }
+                /* CSSKeyframesRule — keep them all (animations referenced by animation-name) */
+                else if (rule.type === 7) {
+                    collectedKeyframes.set(rule.name, rule.cssText);
+                }
+                /* CSSFontFaceRule */
+                else if (rule.type === 5) {
+                    collectedFontFaces.push(rule.cssText);
+                }
+            } catch(e) { /* skip bad rule */ }
+        }
+    }
+
+    for (const sheet of Array.from(document.styleSheets)) {
+        try { processRules(sheet.cssRules); } catch(e) { /* CORS — skip */ }
+    }
+
+    /* Fallback: read any inline <style> tags in the DOM (catches rules that
+       throw CORS errors via styleSheets but are still accessible as textContent) */
+    document.querySelectorAll('style').forEach(s => {
+        const txt = s.textContent || '';
+        if (txt && txt.length < 500000) collectedCSS.push('/* inline <style> */\n' + txt);
+    });
+
+    const capturedCSS =
+        Array.from(collectedKeyframes.values()).join('\n') + '\n' +
+        collectedFontFaces.join('\n') + '\n' +
+        collectedCSS.join('\n');
+
+    /* === 2. Strip chrome/navigation from DOM === */
+    const REMOVE = [
+        'script', 'noscript',
+        'header', '.header', '.page-header', '.pwa-header',
+        'footer', '.footer', '.page-footer', '.pwa-footer',
+        'nav', '.navigation', '.nav',
+        '.breadcrumbs',
+        '.minicart-wrapper', '.block-search',
+        '.modal-popup', '.modal-slide', '.modals-wrapper',
+        '.loading-mask', '.loader',
+        '.cookie-notice', '.cookie-consent',
+        '#cookie-status',
+        '.page-title-wrapper',
+        '.sidebar', '.sidebar-main',
+        /* Slick navigation — these become raw text "Previous"/"Next" without CSS */
+        '.slick-prev', '.slick-next', '.slick-arrow', '.slick-dots',
+    ];
+    REMOVE.forEach(sel => {
+        try { document.querySelectorAll(sel).forEach(el => el.remove()); } catch(e) {}
+    });
 
     /* === 2.3 Un-Slick product carousels ===
        Slick.js replaces  <ol class="product-items"><li>…</li></ol>
@@ -275,8 +368,17 @@ _PLAYWRIGHT_EXTRACTION_JS = r"""
     const ogImage  = document.querySelector('meta[property="og:image"]');
     const h1       = document.querySelector('h1');
 
+    /* Prepend the captured CSS as a <style> block so it travels with the HTML.
+       This is the key insight: the original live site has the styling we want,
+       and document.styleSheets gives us every rule.  We filter to the ones that
+       actually match the container so we don't ship 500KB of unused CSS. */
+    const finalHTML = (capturedCSS.trim()
+        ? '<style data-source="original-site">\n' + capturedCSS + '\n</style>\n'
+        : '') + container.outerHTML;
+
     return {
-        html: container.outerHTML,
+        html: finalHTML,
+        captured_css_bytes: capturedCSS.length,
         title: document.title,
         h1_title: h1 ? h1.innerText.trim() : '',
         description: metaDesc ? metaDesc.getAttribute('content') : '',

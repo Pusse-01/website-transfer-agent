@@ -1205,8 +1205,10 @@ with tab_visual_qa:
         def _raw_preview_page(html_body: str, extra_css: str = "") -> str:
             """Wrap raw HTML in a minimal standalone page with <base href>.
 
-            Includes enough Page Builder / product-carousel CSS so the preview
-            matches what the migrated page will look like in Builder.io.
+            The scraped HTML already contains a <style data-source="original-site">
+            block with every CSS rule from the live page that matches elements in
+            the scraped container.  We do NOT add our own reconstructive CSS here
+            because it would conflict with the captured original styles.
             """
             return f"""<!DOCTYPE html>
 <html lang="zh-HK">
@@ -1215,64 +1217,10 @@ with tab_visual_qa:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <base href="{source_base}/">
 <style>
-*{{box-sizing:border-box;margin:0;padding:0}}
+html,body{{margin:0;padding:0}}
 body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",
-     Arial,"Noto Sans TC",sans-serif;line-height:1.7;color:#333;background:#fff;padding:16px}}
-img{{max-width:100%;height:auto}} a{{color:#236fa1}} p{{margin-bottom:10px}}
-
-/* ---- Product carousel (matches src/css_processor.py PAGEBUILDER_BASE_CSS) ---- */
-.product-carousel-wrapper{{position:relative;width:100%;margin:0 0 24px 0}}
-.carousel-arrow{{position:absolute;top:45%;transform:translateY(-50%);z-index:5;
-    width:36px;height:36px;border-radius:50%;background:#50b748;color:#fff;border:none;
-    cursor:pointer;font-size:20px;line-height:1;font-weight:700;display:flex;
-    align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.18);padding:0}}
-.carousel-arrow:hover{{background:#3f9b3a}}
-.carousel-prev{{left:-4px}} .carousel-next{{right:-4px}}
-.products.list.items,ol.product-items,ul.product-items{{
-    display:flex !important;flex-wrap:nowrap !important;overflow-x:auto !important;
-    overflow-y:visible !important;scroll-snap-type:x mandatory;gap:16px;
-    list-style:none !important;padding:0 0 12px 0 !important;margin:0 !important;
-    -webkit-overflow-scrolling:touch;scrollbar-width:thin;width:100%}}
-.product-item{{flex:0 0 calc((100% - 64px) / 5) !important;min-width:0;
-    scroll-snap-align:start;box-sizing:border-box;display:flex;flex-direction:column;
-    position:relative;border:1px solid #e8e8e8;border-radius:8px;overflow:hidden;
-    background:#fff;padding:0;margin:0}}
-.product-item-info{{position:relative;display:flex;flex-direction:column;
-    width:100%;height:100%}}
-.product-item-photo{{display:block;width:100%;padding:0;text-decoration:none;
-    position:relative}}
-.product-image-container{{display:block !important;width:100% !important;
-    max-width:100% !important;position:relative}}
-.product-image-wrapper{{display:block !important;position:relative !important;
-    height:0 !important;padding-bottom:100%;overflow:hidden !important;
-    background:#f5f5f5;width:100%}}
-.product-item-photo img,.product-image-wrapper img,
-.product-item-photo .product-image-photo{{
-    position:absolute !important;top:0 !important;left:0 !important;
-    width:100% !important;height:100% !important;object-fit:contain !important;
-    display:block !important;margin:0 !important;transition:opacity .3s ease}}
-/* Two-image hover swap */
-.product-item-photo img + img,
-.product-image-wrapper img + img{{opacity:0;z-index:2}}
-.product-item:hover .product-item-photo img + img,
-.product-item:hover .product-image-wrapper img + img{{opacity:1}}
-.product-item:hover .product-item-photo img:first-child,
-.product-item:hover .product-image-wrapper img:first-child{{opacity:0}}
-.product-item-actions,.product-item .actions-primary,
-.product-item .actions-secondary,.product-item .action.tocart,
-.product-item .action.towishlist,.product-item .action.tocompare,
-.product-item .action-towishlist,.product-item .action-tocompare{{display:none !important}}
-.product-item-details{{padding:10px 12px 12px;flex:1;display:flex;flex-direction:column}}
-.product-item-name{{font-size:13px;font-weight:500;line-height:1.4;margin-bottom:6px}}
-.product-item-name a{{color:#333;text-decoration:none}}
-.price-box{{margin-top:auto}}
-.price-box .price{{font-size:15px;font-weight:700;color:#333}}
-[data-content-type="products"]{{width:100%;overflow:visible}}
-.products.list.items li::before,ol.product-items li::before{{content:none !important}}
-
-/* Responsive: fewer items on narrow screens */
-@media (max-width:900px){{.product-item{{flex:0 0 calc((100% - 32px) / 3) !important}}}}
-@media (max-width:600px){{.product-item{{flex:0 0 calc((100% - 16px) / 2) !important}}}}
+     Arial,"Noto Sans TC",sans-serif;background:#fff;padding:16px}}
+img{{max-width:100%;height:auto}}
 </style>
 {extra_css}
 </head>
