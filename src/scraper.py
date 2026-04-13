@@ -230,102 +230,60 @@ async () => {
         try { document.querySelectorAll(sel).forEach(el => el.remove()); } catch(e) {}
     });
 
-    /* === 2.3 Un-Slick product carousels ===
-       Slick.js replaces  <ol class="product-items"><li>…</li></ol>
-       with a complex .slick-slider > .slick-list > .slick-track > .slick-slide
-       structure that includes clone slides for infinite scrolling.
-
-       We reverse this: collect the REAL (non-clone) product <li> items and
-       rebuild a clean <ol class="products list items product-items"> so the
-       Python CSS processor's scroll-snap carousel rules can apply correctly.
-    */
-    try {
-        container.querySelectorAll(
-            '.slick-initialized, .slick-slider'
-        ).forEach(slickEl => {
-            /* Only process if this is a product carousel */
-            const hasProducts = slickEl.querySelector(
-                'li.product-item, li.item.product, li[class*="product"]'
-            );
-            if (!hasProducts) return;
-
-            /* How many items are visible at once? */
-            const wrapper = slickEl.closest('[data-content-type="products"]') || slickEl;
-            let carouselCount = parseInt(
-                wrapper.getAttribute('data-pc-carousel-count') ||
-                wrapper.getAttribute('data-carousel-count') || '0', 10
-            );
-            if (!carouselCount) {
-                carouselCount = slickEl.querySelectorAll(
-                    '.slick-active:not(.slick-cloned)'
-                ).length || 4;
-            }
-
-            /* Collect real (non-clone) product items */
-            const realItems = [];
-            slickEl.querySelectorAll(
-                '.slick-slide:not(.slick-cloned)'
-            ).forEach(slide => {
-                slide.querySelectorAll(
-                    'li.product-item, li.item.product, li[class*="product"]'
-                ).forEach(li => {
-                    /* Reset any inline positioning Slick added to the li */
-                    li.style.removeProperty('position');
-                    li.style.removeProperty('opacity');
-                    li.style.removeProperty('visibility');
-                    li.style.removeProperty('display');
-                    li.style.removeProperty('width');
-                    realItems.push(li.cloneNode(true));
-                });
-            });
-
-            if (realItems.length === 0) return;
-
-            /* Build clean ol.product-items */
-            const ol = document.createElement('ol');
-            ol.className = 'products list items product-items';
-            ol.setAttribute('data-pc-carousel-count', String(carouselCount));
-            realItems.forEach(li => ol.appendChild(li));
-
-            /* Replace the whole wrapper (data-content-type="products" or slick root) */
-            if (wrapper.parentNode) {
-                wrapper.parentNode.insertBefore(ol, wrapper);
-                wrapper.remove();
-            }
-        });
-    } catch(e) {}
-
-    /* === 2.4 Clean non-product image sliders ===
-       For banner/image sliders (no product items inside), just remove
-       clone slides and reset Slick's track transform so all real slides
-       are accessible in a horizontal scroll.
+    /* === 2.3 Fix Slick carousels — simpler "force-visible" approach ===
+       Un-Slick DOM reconstruction is fragile because Magento themes vary
+       in whether products are in <li>, <div>, etc.  Instead we:
+         a) remove clone slides (exact duplicates, not needed)
+         b) remove Slick nav buttons (text-only without CSS)
+         c) reset the track transform and give every real slide
+            position:static + visibility:visible + opacity:1 inline
+       Python will add CSS to make .slick-list scroll horizontally.
     */
     try {
         container.querySelectorAll('.slick-initialized, .slick-slider').forEach(slickEl => {
-            /* Remove clone duplicates */
+            /* Record how many items were active (= carousel column count) */
+            const activeCount = slickEl.querySelectorAll(
+                '.slick-active:not(.slick-cloned)'
+            ).length;
+            if (activeCount > 0) {
+                slickEl.setAttribute('data-pc-carousel-count', String(activeCount));
+            }
+
+            /* Remove clone slides — they're duplicates we don't need */
             slickEl.querySelectorAll('.slick-cloned').forEach(el => el.remove());
-            /* Reset track width/transform so slides don't get clipped */
+
+            /* Remove text-only nav that looks broken without CSS */
+            slickEl.querySelectorAll(
+                '.slick-prev, .slick-next, .slick-arrow, .slick-dots'
+            ).forEach(el => el.remove());
+
+            /* Reset the track so it doesn't translate off-screen */
             const track = slickEl.querySelector('.slick-track');
             if (track) {
-                track.style.removeProperty('width');
-                track.style.removeProperty('transform');
-                track.style.removeProperty('transition');
-                track.style.removeProperty('will-change');
+                track.style.setProperty('transform', 'none', 'important');
+                track.style.setProperty('width', 'auto', 'important');
+                track.style.setProperty('transition', 'none', 'important');
             }
-            /* Allow slides to be visible */
+
+            /* Force ALL slides to be visible */
             slickEl.querySelectorAll('.slick-slide').forEach(slide => {
-                slide.style.removeProperty('width');
-                slide.style.removeProperty('position');
-                slide.style.setProperty('opacity', '1', 'important');
                 slide.style.setProperty('visibility', 'visible', 'important');
+                slide.style.setProperty('opacity', '1', 'important');
+                slide.style.setProperty('display', 'block', 'important');
+                slide.style.removeProperty('width');  /* let flex/CSS set width */
             });
+
+            /* Allow the list to scroll horizontally */
+            const list = slickEl.querySelector('.slick-list');
+            if (list) {
+                list.style.setProperty('overflow-x', 'auto', 'important');
+                list.style.setProperty('overflow-y', 'visible', 'important');
+                list.style.setProperty('height', 'auto', 'important');
+            }
         });
     } catch(e) {}
 
-    /* === 2.5 Reset any remaining carousel overflow:hidden ===
-       After un-Slicking, some wrappers may still have overflow:hidden
-       from their original Magento class CSS. Clear it so nothing clips.
-    */
+    /* === 2.4 Reset overflow on Page Builder wrappers === */
     [
         '[data-content-type="slider"]',
         '[data-content-type="products"]',

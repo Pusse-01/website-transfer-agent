@@ -137,6 +137,60 @@ mark { padding: 2px 4px; }
 }
 
 /* -------------------------------------------------------
+   Slick carousel override — show all real slides as a
+   horizontal scroll row when JS is unavailable.
+   ------------------------------------------------------- */
+/* The outer scrollable container */
+.slick-slider,
+.slick-initialized {
+    overflow-x: auto !important;
+    overflow-y: visible !important;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: #bbb #f0f0f0;
+    position: relative;
+    display: block !important;
+    width: 100% !important;
+}
+/* Track: un-transform it, make it flex */
+.slick-list {
+    overflow-x: auto !important;
+    overflow-y: visible !important;
+    height: auto !important;
+}
+.slick-track {
+    transform: none !important;
+    width: auto !important;
+    transition: none !important;
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    gap: 0 !important;
+}
+/* Each real slide becomes a flex child */
+.slick-slide {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    flex: 0 0 calc((100% - 64px) / 5) !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    scroll-snap-align: start;
+    box-sizing: border-box;
+    padding: 0 8px;
+}
+/* Clones were removed in JS; just in case some remain, hide them */
+.slick-cloned {
+    display: none !important;
+}
+/* Slick nav buttons (rendered as plain text) */
+.slick-prev,
+.slick-next,
+.slick-arrow,
+.slick-dots {
+    display: none !important;
+}
+/* -------------------------------------------------------
    Magento Product Listing (widget / products block)
    Horizontal scroll-snap carousel — 5 items visible at once,
    drag/swipe (or prev/next arrows) to reveal more.  Matches
@@ -1155,6 +1209,96 @@ def _wrap_carousel_with_arrows(soup: BeautifulSoup, container, container_id: str
     wrapper.append(next_btn)
 
 
+def _apply_slick_carousel_layout(soup: BeautifulSoup) -> None:
+    """Apply inline styles to Slick carousel DOM that survives into the output.
+
+    After Playwright scraping, the Slick slider DOM may remain:
+      .slick-slider > .slick-list > .slick-track > .slick-slide (× N)
+
+    The JS step already removed clones and reset track transform.
+    This function applies inline !important styles so the carousel scrolls
+    horizontally even if the captured CSS has Slick's hiding rules.
+    """
+    for slick_el in soup.find_all(class_=lambda c: c and (
+        "slick-initialized" in c or "slick-slider" in c
+    )):
+        # Detect column count from the data attribute we set in JS
+        active_count = _safe_int(slick_el.get("data-pc-carousel-count", "0"), 0)
+        if not active_count:
+            active_count = 5
+
+        gap_px = 16
+        slide_width = f"calc((100% - {(active_count - 1) * gap_px}px) / {active_count})"
+
+        # The .slick-list should scroll
+        for sl_list in slick_el.find_all(class_="slick-list"):
+            s = sl_list.get("style", "")
+            s = _set_inline_style_property(s, "overflow-x", "auto")
+            s = _set_inline_style_property(s, "overflow-y", "visible")
+            s = _set_inline_style_property(s, "height", "auto")
+            sl_list["style"] = s
+
+        # The .slick-track should be flex row
+        for sl_track in slick_el.find_all(class_="slick-track"):
+            s = sl_track.get("style", "")
+            s = _set_inline_style_property(s, "transform", "none")
+            s = _set_inline_style_property(s, "width", "auto")
+            s = _set_inline_style_property(s, "transition", "none")
+            s = _set_inline_style_property(s, "display", "flex")
+            s = _set_inline_style_property(s, "flex-wrap", "nowrap")
+            s = _set_inline_style_property(s, "gap", f"{gap_px}px")
+            sl_track["style"] = s
+
+        # Each real slide: visible, sized correctly, hover overlay removed
+        for slide in slick_el.find_all(class_=lambda c: c and "slick-slide" in c):
+            classes = slide.get("class", [])
+            if "slick-cloned" in classes:
+                slide.decompose()
+                continue
+            s = slide.get("style", "")
+            s = _set_inline_style_property(s, "display", "block")
+            s = _set_inline_style_property(s, "visibility", "visible")
+            s = _set_inline_style_property(s, "opacity", "1")
+            s = _set_inline_style_property(s, "flex", f"0 0 {slide_width}")
+            s = _set_inline_style_property(s, "min-width", "0")
+            s = _set_inline_style_property(s, "box-sizing", "border-box")
+            s = _set_inline_style_property(s, "width", slide_width)
+            s = _set_inline_style_property(s, "scroll-snap-align", "start")
+            slide["style"] = s
+
+            # Fix images inside slides
+            for img_w in slide.find_all(class_="product-image-wrapper"):
+                ss = img_w.get("style", "")
+                if "padding-bottom" not in ss:
+                    ss = _set_inline_style_property(ss, "padding-bottom", "100%")
+                ss = _set_inline_style_property(ss, "position", "relative")
+                ss = _set_inline_style_property(ss, "display", "block")
+                ss = _set_inline_style_property(ss, "height", "0")
+                ss = _set_inline_style_property(ss, "overflow", "hidden")
+                img_w["style"] = ss
+                for img in img_w.find_all("img"):
+                    iss = img.get("style", "")
+                    iss = _set_inline_style_property(iss, "position", "absolute")
+                    iss = _set_inline_style_property(iss, "top", "0")
+                    iss = _set_inline_style_property(iss, "left", "0")
+                    iss = _set_inline_style_property(iss, "width", "100%")
+                    iss = _set_inline_style_property(iss, "height", "100%")
+                    iss = _set_inline_style_property(iss, "object-fit", "contain")
+                    iss = _set_inline_style_property(iss, "opacity", "1")
+                    img["style"] = iss
+
+            # Remove action button overlays inside each slide
+            for cls_part in ("product-item-actions", "actions-primary", "actions-secondary",
+                              "action-towishlist", "action-tocompare"):
+                for el in slide.find_all(class_=lambda c: c and cls_part in c):
+                    el.decompose()
+
+        # Wrap the whole slick element with prev/next arrows
+        container_id = slick_el.get("id") or f"slick-{id(slick_el) & 0xFFFFF:x}"
+        slick_el["id"] = container_id
+        _wrap_carousel_with_arrows(soup, slick_el, container_id)
+
+
 def _apply_toc_layout(soup: BeautifulSoup) -> None:
     """Detect and style Table of Contents boxes from Amasty Blog or custom HTML blocks.
 
@@ -1297,9 +1441,9 @@ def _apply_pagebuilder_layout_styles(soup: BeautifulSoup) -> None:
         el["style"] = _merge_inline_style(el.get("style", ""), "margin-bottom: 0; word-wrap: break-word")
 
     _apply_background_image_styles(soup)
-    _unslick_product_carousels(soup)   # must run before _apply_product_listing_layout
     _apply_slider_fallback_layout(soup)
-    _apply_product_listing_layout(soup)
+    _apply_slick_carousel_layout(soup)  # force Slick DOM to show as horizontal scroll
+    _apply_product_listing_layout(soup)  # also handle reconstructed ol.product-items if present
     _apply_toc_layout(soup)
 
 
