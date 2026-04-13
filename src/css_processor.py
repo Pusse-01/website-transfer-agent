@@ -1114,24 +1114,17 @@ def _apply_product_listing_layout(soup: BeautifulSoup) -> None:
                     item["onmouseover"] = mover
                     item["onmouseout"] = mout
 
-            # Hide action buttons that would overlap the image without JS hover
-            for actions in item.find_all(class_=lambda c: c and (
-                "product-item-actions" in c
-                or "actions-primary" in c
-                or "actions-secondary" in c
-                or "action-towishlist" in c
-                or "action-tocompare" in c
-            )):
-                ss = actions.get("style", "")
-                ss = _set_inline_style_property(ss, "display", "none")
-                actions["style"] = ss
-            # Also remove tocart / towishlist / tocompare buttons by action class
-            for btn in item.find_all(class_=lambda c: c and any(
-                k in c for k in ("tocart", "towishlist", "tocompare", "action-primary")
-            )):
-                ss = btn.get("style", "")
-                ss = _set_inline_style_property(ss, "display", "none")
-                btn["style"] = ss
+            # Remove all action containers — use select() so multi-value classes work
+            for sel in (
+                ".product-item-inner",
+                ".product-item-actions",
+                ".actions-primary",
+                ".actions-secondary",
+                "form",
+                ".tocart", ".towishlist", ".tocompare",
+            ):
+                for el in item.select(sel):
+                    el.decompose()
 
             # Fix product-item-details — normal block flow
             for details in item.find_all(class_="product-item-details"):
@@ -1306,10 +1299,18 @@ def _apply_slick_carousel_layout(soup: BeautifulSoup) -> None:
                     iss = _set_inline_style_property(iss, "opacity", "1")
                     img["style"] = iss
 
-            # Remove action button overlays inside each slide
-            for cls_part in ("product-item-actions", "actions-primary", "actions-secondary",
-                              "action-towishlist", "action-tocompare"):
-                for el in slide.find_all(class_=lambda c: c and cls_part in c):
+            # Remove action buttons — keep only image + name + price.
+            # Magento uses classes like "action tocart" (two class values) not "action-tocart".
+            # We use CSS-selector-based select() which handles multi-class correctly.
+            for sel in (
+                ".product-item-inner",      # wrapper for all actions
+                ".product-item-actions",    # direct action container
+                ".actions-primary",         # add-to-cart / out-of-stock button
+                ".actions-secondary",       # wishlist / compare links
+                "form",                     # catches any form with tocart
+                ".tocart", ".towishlist", ".tocompare",  # direct class names
+            ):
+                for el in slide.select(sel):
                     el.decompose()
 
         # Wrap the whole slick element with prev/next arrows

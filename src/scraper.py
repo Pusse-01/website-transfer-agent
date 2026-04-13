@@ -59,32 +59,41 @@ async () => {
        Without JS + hover, they show up stuck-open and cover the products.
        We physically REMOVE them — users can still click through to the
        product detail page from the product-item link. */
+
+    /* Simplest approach: remove the entire .product-item-inner block.
+       This contains ALL action buttons (add-to-cart, wishlist, compare,
+       out-of-stock) regardless of the exact class names used by the theme.
+       The product name and price (in .product-item-details above .product-item-inner)
+       remain untouched. */
+    try {
+        container.querySelectorAll(
+            '[class*="product-item"] .product-item-inner, ' +
+            '[class*="product-item"] .product-item-actions, ' +
+            '[class*="product-item"] .actions-primary, ' +
+            '[class*="product-item"] .actions-secondary, ' +
+            '[class*="product-item"] form'
+        ).forEach(el => el.remove());
+    } catch(e) {}
+
+    /* Also remove any remaining action/cart/wishlist/compare links & buttons
+       that live outside .product-item-inner (some themes render them differently) */
     const HOVER_OVERLAY_SELECTORS = [
-        '.product-item .product-item-actions',
-        '.product-item .actions-primary',
-        '.product-item .actions-secondary',
-        '.product-item .action.tocart',
-        '.product-item .action.towishlist',
-        '.product-item .action.tocompare',
-        '.product-item .action-towishlist',
-        '.product-item .action-tocompare',
-        '.product-item .action-tocart',
-        '.product-item .tocompare',
-        '.product-item .towishlist',
         '.product-item .tocart',
+        '.product-item .towishlist',
+        '.product-item .tocompare',
+        '.product-item [class*="tocart"]',
+        '.product-item [class*="towishlist"]',
+        '.product-item [class*="tocompare"]',
         '.product-item [class*="find-similar"]',
         '.product-item [class*="findsimilar"]',
-        '.product-item [class*="similar-search"]',
         '.product-item [class*="amsearch"]',
         '.product-item [class*="quickview"]',
-        '.product-item [class*="quick-view"]',
         '.product-item .product-image-actions',
         '.product-item .hover-actions',
         '.product-item .hover-overlay',
-        '.product-item .item-hover',
-        '.product-item .product-hover',
         '.product-item .products-list-details-box',
-        '.product-item .item-action',
+        /* Slick nav (renders as text without CSS) */
+        '.slick-prev', '.slick-next', '.slick-arrow', '.slick-dots',
     ];
     HOVER_OVERLAY_SELECTORS.forEach(sel => {
         try { container.querySelectorAll(sel).forEach(el => el.remove()); } catch(e) {}
