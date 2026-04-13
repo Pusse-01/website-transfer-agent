@@ -32,7 +32,7 @@ except Exception:
 # is visually faithful without needing any external CSS file.
 # ---------------------------------------------------------------------------
 _PLAYWRIGHT_EXTRACTION_JS = r"""
-() => {
+async () => {
     /* === 1. Find content area FIRST (before we remove anything) === */
     const CANDIDATES = [
         '.amblog-post-content',
@@ -53,12 +53,48 @@ _PLAYWRIGHT_EXTRACTION_JS = r"""
     }
     if (!container) return null;
 
+    /* === 1.4 AGGRESSIVELY remove hover-overlay action menus.
+       These are the dark floating buttons ("加入收藏清單" / "加入產品比較" /
+       "找相似" / "加到購物車") that overlay the product image on hover.
+       Without JS + hover, they show up stuck-open and cover the products.
+       We physically REMOVE them — users can still click through to the
+       product detail page from the product-item link. */
+    const HOVER_OVERLAY_SELECTORS = [
+        '.product-item .product-item-actions',
+        '.product-item .actions-primary',
+        '.product-item .actions-secondary',
+        '.product-item .action.tocart',
+        '.product-item .action.towishlist',
+        '.product-item .action.tocompare',
+        '.product-item .action-towishlist',
+        '.product-item .action-tocompare',
+        '.product-item .action-tocart',
+        '.product-item .tocompare',
+        '.product-item .towishlist',
+        '.product-item .tocart',
+        '.product-item [class*="find-similar"]',
+        '.product-item [class*="findsimilar"]',
+        '.product-item [class*="similar-search"]',
+        '.product-item [class*="amsearch"]',
+        '.product-item [class*="quickview"]',
+        '.product-item [class*="quick-view"]',
+        '.product-item .product-image-actions',
+        '.product-item .hover-actions',
+        '.product-item .hover-overlay',
+        '.product-item .item-hover',
+        '.product-item .product-hover',
+        '.product-item .products-list-details-box',
+        '.product-item .item-action',
+    ];
+    HOVER_OVERLAY_SELECTORS.forEach(sel => {
+        try { container.querySelectorAll(sel).forEach(el => el.remove()); } catch(e) {}
+    });
+
     /* === 1.5 Capture ALL relevant CSS rules BEFORE stripping chrome ===
-       The live site has ~50 external stylesheets and many inline <style> blocks.
        We walk every rule in every accessible stylesheet and KEEP only the rules
-       whose selector actually matches an element in our container (or @keyframes
-       / @font-face rules which we always keep).  This gives the migrated HTML
-       the EXACT same CSS the original page uses — no reconstruction needed.
+       whose selector actually matches an element in our container.  For CORS-
+       blocked stylesheets (href only, cssRules throws) we fetch the href as
+       plain text and parse it with a fresh CSSStyleSheet.
     */
     const collectedCSS = [];
     const collectedFontFaces = [];
@@ -130,12 +166,39 @@ _PLAYWRIGHT_EXTRACTION_JS = r"""
         }
     }
 
+    /* For each stylesheet: try cssRules first; on CORS failure, fetch the href
+       as text and parse with a new CSSStyleSheet (works in all Chromium). */
+    const corsFetchPromises = [];
     for (const sheet of Array.from(document.styleSheets)) {
-        try { processRules(sheet.cssRules); } catch(e) { /* CORS — skip */ }
+        let got = false;
+        try {
+            if (sheet.cssRules) { processRules(sheet.cssRules); got = true; }
+        } catch(e) { /* CORS */ }
+        if (!got && sheet.href) {
+            const href = sheet.href;
+            corsFetchPromises.push(
+                fetch(href, { credentials: 'same-origin' })
+                    .then(r => r.ok ? r.text() : '')
+                    .then(cssText => {
+                        if (!cssText) return;
+                        try {
+                            const s = new CSSStyleSheet();
+                            s.replaceSync(cssText);
+                            processRules(s.cssRules);
+                        } catch(e) {
+                            /* CSSStyleSheet.replaceSync may not be available — fall
+                               back to raw text inclusion so the rules still ship. */
+                            collectedCSS.push('/* cors-fetched: ' + href + ' */\n' + cssText);
+                        }
+                    })
+                    .catch(() => { /* network error — skip */ })
+            );
+        }
     }
+    await Promise.all(corsFetchPromises);
 
-    /* Fallback: read any inline <style> tags in the DOM (catches rules that
-       throw CORS errors via styleSheets but are still accessible as textContent) */
+    /* Also include inline <style> tags verbatim (the original-site authors may
+       have put !important overrides there that we want to ship). */
     document.querySelectorAll('style').forEach(s => {
         const txt = s.textContent || '';
         if (txt && txt.length < 500000) collectedCSS.push('/* inline <style> */\n' + txt);
@@ -457,6 +520,12 @@ def _run_playwright_scrape(url: str, base_url: str = "") -> dict | None:
         if not result or not result.get("html"):
             logger.warning("Playwright returned empty content for %s", url)
             return None
+
+        css_bytes = result.get("captured_css_bytes", 0)
+        logger.info(
+            "Playwright scrape: %d bytes HTML, %d bytes captured CSS from original site",
+            len(result.get("html", "")), css_bytes
+        )
 
         url_key = url.rstrip("/").split("/")[-1]
         return {
