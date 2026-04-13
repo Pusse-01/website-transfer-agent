@@ -332,8 +332,15 @@ class MigrationAgent:
     def _migrate_single_page(
         self, url_key: str, page_type: str, primary_url: str,
         publish: bool, skip_existing: bool, dry_run: bool,
+        html_override: str = "",
     ) -> dict:
-        """Migrate a single page through the full pipeline."""
+        """Migrate a single page through the full pipeline.
+
+        Args:
+            html_override: If provided, skip scraping and use this HTML as the
+                           page content. Useful when an AI-fixed HTML is supplied
+                           from the Visual QA tab.
+        """
         result = {
             "url_key": url_key,
             "page_type": page_type,
@@ -360,9 +367,20 @@ class MigrationAgent:
                     return result
                 existing_entry_id = existing_entry.get("id") if existing_entry else None
 
-            # Step 2: Scrape the page
-            self.mlog.info(url_key, page_type, "scrape", "Scraping content...")
-            page_data = self._scrape_page(url_key, page_type, primary_url)
+            # Step 2: Scrape the page (or use supplied html_override)
+            if html_override:
+                self.mlog.info(url_key, page_type, "scrape",
+                               "Using AI-fixed HTML override (skipping scrape)")
+                page_data = {
+                    "url_key": url_key,
+                    "title": url_key,
+                    "html_content": html_override,
+                    "source": "html_override",
+                    "images": [],
+                }
+            else:
+                self.mlog.info(url_key, page_type, "scrape", "Scraping content...")
+                page_data = self._scrape_page(url_key, page_type, primary_url)
 
             if page_data.get("error"):
                 self.mlog.error(url_key, page_type, "scrape",

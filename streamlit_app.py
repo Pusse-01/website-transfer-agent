@@ -35,6 +35,7 @@ from src.excel_reader import read_blog_list, read_static_page_list, detect_excel
 from src.excel_writer import export_blog_results
 from src.migration_agent import MigrationAgent
 from src.state_persistence import save_run, load_run, load_latest_run, list_runs
+from src.visual_qa import VisualQA, PLAYWRIGHT_AVAILABLE, OPENAI_AVAILABLE
 
 load_dotenv()
 
@@ -120,6 +121,25 @@ with st.sidebar:
         type="password",
         help="Required for uploading to Builder.io",
     )
+
+    st.divider()
+    st.subheader("OpenAI (Visual QA)")
+    openai_api_key = st.text_input(
+        "OpenAI API Key",
+        value=os.getenv("OPENAI_API_KEY", ""),
+        type="password",
+        help="Required for AI visual comparison in the AI Visual QA tab",
+    )
+    openai_model = st.selectbox(
+        "OpenAI Model",
+        ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+        index=0,
+        help="gpt-4o recommended for vision comparisons",
+    )
+    if PLAYWRIGHT_AVAILABLE:
+        st.caption("Playwright: available (screenshot mode)")
+    else:
+        st.caption("Playwright: not installed (text-only mode)")
 
     st.divider()
     st.subheader("Status")
@@ -213,9 +233,10 @@ def builder_entry_to_preview_data(entry: dict) -> dict:
 st.title("Website Transfer Agent")
 st.caption("Migrate blog posts and static pages from Magento to Builder.io")
 
-tab_input, tab_preview, tab_pipeline, tab_builder, tab_results, tab_logs = st.tabs(
+tab_input, tab_preview, tab_pipeline, tab_builder, tab_results, tab_logs, tab_visual_qa = st.tabs(
     ["1. Upload Excel", "2. Preview Pages", "3. Run Migration",
-     "4. Builder.io Browser", "5. Results & Export", "6. Logs"]
+     "4. Builder.io Browser", "5. Results & Export", "6. Logs",
+     "7. AI Visual QA"]
 )
 
 # ========================== TAB 1: UPLOAD EXCEL ==========================
@@ -1079,3 +1100,317 @@ with tab_logs:
         st.session_state.pop("_state_loaded", None)
         st.session_state.pop("current_run_id", None)
         st.rerun()
+
+
+# ========================== TAB 7: AI VISUAL QA ==========================
+with tab_visual_qa:
+    st.subheader("AI Visual QA — Compare & Auto-Fix Scraped Pages")
+
+    st.markdown("""
+    This tool compares the **original live website** against the **scraped/processed version**
+    using OpenAI Vision (GPT-4o).  It identifies layout differences and generates CSS fixes
+    so the migrated page matches the original as closely as possible.
+
+    **Workflow:**
+    1. Enter the URL of the page you want to audit
+    2. Click **Scrape & Preview** to fetch and process the content
+    3. Click **Run AI Comparison** to send both versions to OpenAI
+    4. Review the differences and apply the suggested CSS fixes
+    5. Upload the fixed version to Builder.io
+    """)
+
+    # Status indicators
+    col_status1, col_status2 = st.columns(2)
+    with col_status1:
+        if PLAYWRIGHT_AVAILABLE:
+            st.success("Playwright: available — screenshot mode active")
+        else:
+            st.warning("Playwright not installed — falling back to HTML text comparison")
+    with col_status2:
+        if openai_api_key:
+            st.success("OpenAI API key: configured")
+        else:
+            st.warning("OpenAI API key: not set — enter key in sidebar")
+
+    st.divider()
+
+    # ── Input ────────────────────────────────────────────────────────────
+    qa_url = st.text_input(
+        "Page URL to audit",
+        placeholder="https://www.pricerite.com.hk/blog/intro-fur-tips",
+        key="qa_url_input",
+    )
+    qa_col1, qa_col2 = st.columns([2, 1])
+    with qa_col1:
+        qa_page_type = st.radio(
+            "Page type",
+            ["blog", "static"],
+            horizontal=True,
+            key="qa_page_type",
+        )
+    with qa_col2:
+        qa_scrape_btn = st.button(
+            "Scrape & Preview",
+            type="primary",
+            key="qa_scrape_btn",
+            disabled=not qa_url,
+        )
+
+    # ── Scrape ───────────────────────────────────────────────────────────
+    if qa_scrape_btn and qa_url:
+        with st.spinner(f"Scraping {qa_url} …"):
+            try:
+                if qa_page_type == "blog":
+                    # Extract url_key from full URL
+                    qa_url_key = qa_url.rstrip("/").split("/")[-1]
+                    scraper = BlogScraper(source_url, blog_path)
+                    qa_post = scraper.fetch_post_by_url_key(qa_url_key)
+                else:
+                    qa_url_key = qa_url.rstrip("/").split("/")[-1]
+                    scraper = StaticPageScraper(source_url)
+                    qa_post = scraper.fetch_page_by_url(qa_url, qa_url_key)
+
+                if qa_post.get("error"):
+                    st.error(f"Scraping failed: {qa_post['error']}")
+                elif not qa_post.get("html_content"):
+                    st.warning("No content found for this URL.")
+                else:
+                    st.session_state["qa_post"] = qa_post
+                    st.session_state["qa_url"] = qa_url
+                    st.session_state.pop("qa_ai_result", None)
+                    st.session_state.pop("qa_fixed_html", None)
+                    st.success(f"Scraped: {qa_post.get('title', qa_url_key)}")
+            except Exception as e:
+                st.error(f"Exception during scraping: {e}")
+
+    # ── Side-by-side preview ─────────────────────────────────────────────
+    if st.session_state.get("qa_post"):
+        qa_post = st.session_state["qa_post"]
+        saved_url = st.session_state.get("qa_url", qa_url)
+
+        st.divider()
+        st.markdown("### Side-by-Side Preview")
+
+        col_orig, col_scraped = st.columns(2)
+
+        with col_orig:
+            st.markdown("**Original Website**")
+            st.markdown(f"[Open in new tab]({saved_url})")
+            # Embed original in an iframe (may be blocked by X-Frame-Options)
+            orig_iframe = f"""
+            <iframe src="{saved_url}"
+                    style="width:100%;height:700px;border:1px solid #ddd;border-radius:6px;"
+                    sandbox="allow-same-origin allow-scripts">
+            </iframe>
+            <p style="font-size:12px;color:#999;margin-top:4px;">
+              If the page blocks iframes, use the link above to open it directly.
+            </p>
+            """
+            components.html(orig_iframe, height=730)
+
+        with col_scraped:
+            st.markdown("**Scraped / Processed Version**")
+            scraped_html = generate_blog_preview_html(qa_post, base_url=source_url)
+            components.html(scraped_html, height=700, scrolling=True)
+
+        # ── AI Comparison ───────────────────────────────────────────────
+        st.divider()
+        st.markdown("### AI Visual Comparison")
+
+        ai_btn_disabled = not openai_api_key
+        if ai_btn_disabled:
+            st.info("Enter your OpenAI API key in the sidebar to enable AI comparison.")
+
+        ai_compare_btn = st.button(
+            "Run AI Comparison",
+            type="primary",
+            key="qa_ai_btn",
+            disabled=ai_btn_disabled,
+        )
+
+        if ai_compare_btn:
+            with st.spinner("Running AI visual comparison — this may take 30–60 seconds …"):
+                try:
+                    qa_agent = VisualQA(openai_api_key=openai_api_key, model=openai_model)
+                    ai_result = qa_agent.compare(
+                        original_url=saved_url,
+                        scraped_html=scraped_html,
+                        source_base_url=source_url,
+                        use_screenshots=PLAYWRIGHT_AVAILABLE,
+                    )
+                    st.session_state["qa_ai_result"] = ai_result
+                    st.session_state.pop("qa_fixed_html", None)
+                    method_label = {"vision": "screenshot comparison", "text": "HTML text comparison", "none": "unavailable"}.get(ai_result.get("method", "none"), "unknown")
+                    st.success(f"AI comparison complete (method: {method_label})")
+                except Exception as e:
+                    st.error(f"AI comparison failed: {e}")
+
+        # ── Show AI results ─────────────────────────────────────────────
+        if st.session_state.get("qa_ai_result"):
+            ai_result = st.session_state["qa_ai_result"]
+
+            if ai_result.get("error"):
+                st.error(f"AI error: {ai_result['error']}")
+            else:
+                # Summary
+                st.markdown(f"**Summary:** {ai_result.get('summary', 'No summary')}")
+
+                # Screenshots side by side (if vision mode)
+                if "orig_screenshot" in ai_result and "scraped_screenshot" in ai_result:
+                    sc_col1, sc_col2 = st.columns(2)
+                    with sc_col1:
+                        st.markdown("**Original Screenshot**")
+                        st.image(ai_result["orig_screenshot"], use_container_width=True)
+                    with sc_col2:
+                        st.markdown("**Scraped Screenshot**")
+                        st.image(ai_result["scraped_screenshot"], use_container_width=True)
+
+                # Differences table
+                differences = ai_result.get("differences", [])
+                if differences:
+                    st.markdown(f"### Identified Issues ({len(differences)})")
+                    for i, diff in enumerate(differences, 1):
+                        severity = diff.get("severity", "medium")
+                        color = {"high": "red", "medium": "orange", "low": "blue"}.get(severity, "gray")
+                        with st.expander(
+                            f"[{severity.upper()}] {diff.get('element', f'Issue {i}')}",
+                            expanded=(severity == "high"),
+                        ):
+                            st.markdown(f"**Issue:** {diff.get('issue', '')}")
+                            st.code(diff.get("fix", ""), language="css")
+                else:
+                    st.success("No significant differences found! The pages look identical.")
+
+                # Generated CSS
+                additional_css = ai_result.get("additional_css", "")
+                if additional_css:
+                    with st.expander("Generated CSS Fix (full block)", expanded=False):
+                        st.code(additional_css, language="css")
+
+                # Apply fixes
+                st.divider()
+                apply_fixes_btn = st.button(
+                    "Apply AI Fixes & Preview",
+                    type="primary",
+                    key="qa_apply_fixes_btn",
+                    disabled=not additional_css,
+                )
+
+                if apply_fixes_btn and additional_css:
+                    qa_agent = VisualQA(openai_api_key=openai_api_key, model=openai_model)
+                    fixed_html = qa_agent.apply_fixes(scraped_html, additional_css)
+                    st.session_state["qa_fixed_html"] = fixed_html
+                    st.success("CSS fixes applied!")
+                    st.rerun()
+
+        # ── Fixed version preview & upload ──────────────────────────────
+        if st.session_state.get("qa_fixed_html"):
+            fixed_html = st.session_state["qa_fixed_html"]
+            st.divider()
+            st.markdown("### Fixed Version Preview")
+
+            fix_col1, fix_col2 = st.columns(2)
+            with fix_col1:
+                st.markdown("**Before (scraped)**")
+                components.html(scraped_html, height=600, scrolling=True)
+            with fix_col2:
+                st.markdown("**After (AI-fixed)**")
+                components.html(fixed_html, height=600, scrolling=True)
+
+            # Download fixed HTML
+            st.download_button(
+                "Download Fixed HTML",
+                data=fixed_html,
+                file_name=f"fixed_{qa_post.get('url_key', 'page')}.html",
+                mime="text/html",
+                key="qa_download_fixed",
+            )
+
+            # Upload to Builder.io
+            st.divider()
+            st.markdown("### Upload Fixed Version to Builder.io")
+
+            if not builder_private_key or builder_private_key == "your_builder_private_api_key_here":
+                st.warning("Enter your Builder.io Private API Key in the sidebar to enable upload.")
+            else:
+                publish_fixed = st.checkbox(
+                    "Publish immediately (uncheck to save as draft)",
+                    key="qa_publish_fixed",
+                )
+
+                upload_fixed_btn = st.button(
+                    "Upload to Builder.io",
+                    type="primary",
+                    key="qa_upload_btn",
+                )
+
+                if upload_fixed_btn:
+                    with st.spinner("Uploading to Builder.io …"):
+                        try:
+                            # Re-process through migration agent but inject the fixed HTML
+                            from src.css_processor import process_html_for_builder
+                            from bs4 import BeautifulSoup as _BS
+
+                            # Extract just the body content from fixed_html
+                            _fsoup = _BS(fixed_html, "html.parser")
+                            _body = _fsoup.find("body")
+                            fixed_content = str(_body) if _body else fixed_html
+
+                            # Override the post's html_content with the fixed version
+                            upload_post = dict(qa_post)
+                            upload_post["html_content"] = fixed_content
+
+                            agent = MigrationAgent(
+                                source_base_url=source_url,
+                                builder_api_key=builder_private_key,
+                                builder_model=builder_blog_model,
+                                blog_model=builder_blog_model,
+                                page_model=builder_page_model,
+                                blog_path=blog_path,
+                                builder_public_key=builder_public_key,
+                            )
+
+                            url_key = qa_post.get("url_key", "")
+                            page_type = qa_post.get("page_type", "blog")
+
+                            result = agent._migrate_single_page(
+                                url_key=url_key,
+                                page_type=page_type,
+                                primary_url=saved_url,
+                                publish=publish_fixed,
+                                skip_existing=False,
+                                dry_run=False,
+                                html_override=fixed_content,
+                            )
+
+                            if result.get("status") in ("published_by_agent", "uploaded"):
+                                st.success(
+                                    f"Uploaded successfully! Builder ID: {result.get('builder_id', 'N/A')}"
+                                )
+                            else:
+                                st.error(
+                                    f"Upload failed: {result.get('error', result.get('status', 'unknown'))}"
+                                )
+                        except Exception as e:
+                            st.error(f"Upload error: {e}")
+
+            # Re-run AI comparison on fixed version
+            recheck_btn = st.button(
+                "Re-run AI Comparison on Fixed Version",
+                key="qa_recheck_btn",
+                disabled=not openai_api_key,
+            )
+            if recheck_btn and openai_api_key:
+                with st.spinner("Re-running AI comparison on fixed version …"):
+                    try:
+                        qa_agent = VisualQA(openai_api_key=openai_api_key, model=openai_model)
+                        recheck_result = qa_agent.compare(
+                            original_url=saved_url,
+                            scraped_html=fixed_html,
+                            source_base_url=source_url,
+                            use_screenshots=PLAYWRIGHT_AVAILABLE,
+                        )
+                        st.session_state["qa_ai_result"] = recheck_result
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Re-check failed: {e}")

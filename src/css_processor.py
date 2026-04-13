@@ -126,6 +126,214 @@ mark { padding: 2px 4px; }
     border-color: #50b748;
     color: #50b748 !important;
 }
+
+/* -------------------------------------------------------
+   Magento Product Listing (widget / products block)
+   Converts vertical list → responsive card grid
+   ------------------------------------------------------- */
+.products.list.items,
+ol.product-items,
+ul.product-items {
+    display: grid !important;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 16px;
+    list-style: none !important;
+    padding: 0 !important;
+    margin: 0 0 24px 0 !important;
+}
+.product-item {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid #e8e8e8;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #fff;
+}
+.product-item-info {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+.product-item-photo {
+    display: block;
+    text-align: center;
+    padding: 12px;
+    background: #fafafa;
+}
+.product-item-photo img,
+.product-item-photo .product-image-photo {
+    max-width: 100% !important;
+    height: 160px !important;
+    object-fit: contain;
+    display: block;
+    margin: 0 auto;
+}
+.product-item-details {
+    padding: 10px 12px 12px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+.product-item-name {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    margin-bottom: 6px;
+}
+.product-item-name a {
+    color: #333;
+    text-decoration: none;
+}
+.price-box {
+    margin-top: auto;
+}
+.price-box .price {
+    font-size: 15px;
+    font-weight: 700;
+    color: #333;
+}
+.product-item-actions {
+    padding: 8px 12px;
+    border-top: 1px solid #f0f0f0;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+.product-badge,
+.badge-new,
+.badge-sale,
+.product-item .new-label,
+.product-item .sale-label {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    background: #50b748;
+    color: #fff;
+    position: relative;
+}
+/* Magento widget product block wrapper */
+[data-content-type="products"] {
+    width: 100%;
+    overflow: hidden;
+}
+/* Remove default list counters that appear due to ol */
+.products.list.items li::before,
+ol.product-items li::before {
+    content: none !important;
+}
+
+/* -------------------------------------------------------
+   Table of Contents (TOC) box — Amasty Blog / custom
+   ------------------------------------------------------- */
+.amblog-toc,
+.amblog-table-of-contents,
+.amtoc-wrap,
+.table-of-contents,
+[class*="toc-box"],
+[class*="toc-wrap"],
+[class*="toc-container"] {
+    background: #f7f7f7;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 28px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: flex-start;
+}
+.amblog-toc-title,
+.amtoc-title,
+[class*="toc-title"],
+[class*="toc-heading"] {
+    font-weight: 700;
+    font-size: 17px;
+    color: #333;
+    min-width: 60px;
+}
+.amblog-toc-list,
+.amtoc-list,
+[class*="toc-list"] {
+    list-style: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    flex: 1;
+    min-width: 200px;
+}
+.amblog-toc-list li,
+.amtoc-list li,
+[class*="toc-list"] li {
+    margin-bottom: 8px;
+}
+.amblog-toc-list a,
+.amtoc-list a,
+[class*="toc-list"] a {
+    color: #236fa1;
+    text-decoration: none;
+    font-size: 14px;
+    border-bottom: 1px solid #d0e8f5;
+    padding-bottom: 4px;
+    display: block;
+}
+
+/* -------------------------------------------------------
+   Comparison / feature tables (board material tables etc.)
+   ------------------------------------------------------- */
+.comparison-table,
+[class*="comparison"],
+[data-content-type="row"] table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0 24px;
+}
+.comparison-table th,
+.comparison-table td,
+[data-content-type="row"] table th,
+[data-content-type="row"] table td {
+    border: 1px solid #d0d0d0;
+    padding: 10px 14px;
+    text-align: center;
+    vertical-align: middle;
+    font-size: 14px;
+}
+.comparison-table th,
+[data-content-type="row"] table th {
+    background: #f0f0f0;
+    font-weight: 700;
+    color: #222;
+}
+.comparison-table tr:nth-child(even),
+[data-content-type="row"] table tr:nth-child(even) {
+    background: #fafafa;
+}
+
+/* -------------------------------------------------------
+   Highlighted / info boxes (green-bordered tip boxes)
+   ------------------------------------------------------- */
+.pagebuilder-banner-wrapper,
+.info-box,
+[class*="info-box"],
+[class*="highlight-box"],
+[class*="tip-box"] {
+    border: 2px solid #50b748;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 16px 0;
+    background: #f8fff8;
+}
+
+/* -------------------------------------------------------
+   Responsive: stack product grid to 2 cols on small screens
+   ------------------------------------------------------- */
+@media (max-width: 600px) {
+    .products.list.items,
+    ol.product-items {
+        grid-template-columns: repeat(2, 1fr) !important;
+    }
+}
 """
 
 # Elements that should be completely removed from migrated content
@@ -443,6 +651,79 @@ def _apply_slider_fallback_layout(soup: BeautifulSoup) -> None:
             slide["style"] = style
 
 
+def _apply_product_listing_layout(soup: BeautifulSoup) -> None:
+    """Convert Magento product listing ol/ul from vertical list to card grid.
+
+    Magento product widgets render as <ol class="products list items product-items">
+    which displays as a numbered list in plain HTML. We convert it to a CSS grid
+    so it looks like the original horizontal product carousel/grid.
+    """
+    # Target any <ol> or <ul> that has the Magento product-items class
+    for container in soup.find_all(["ol", "ul"], class_=lambda c: c and "product-items" in c):
+        container["style"] = _merge_inline_style(
+            container.get("style", ""),
+            "display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); "
+            "gap: 16px; list-style: none; padding: 0; margin: 0 0 24px 0;"
+        )
+        for item in container.find_all("li", class_=lambda c: c and "product-item" in c):
+            item["style"] = _merge_inline_style(
+                item.get("style", ""),
+                "box-sizing: border-box; display: flex; flex-direction: column; "
+                "border: 1px solid #e8e8e8; border-radius: 8px; overflow: hidden; background: #fff;"
+            )
+
+    # Also handle [data-content-type="products"] blocks
+    for el in soup.find_all(attrs={"data-content-type": "products"}):
+        el["style"] = _merge_inline_style(el.get("style", ""), "width: 100%; overflow: hidden;")
+
+
+def _apply_toc_layout(soup: BeautifulSoup) -> None:
+    """Detect and style Table of Contents boxes from Amasty Blog or custom HTML blocks.
+
+    TOC boxes often have a two-column layout: heading on left, links on right.
+    We detect them by common class patterns and ensure the box styling is preserved.
+    """
+    toc_classes = [
+        "amblog-toc", "amblog-table-of-contents", "amtoc-wrap",
+        "table-of-contents", "toc-box", "toc-wrap", "toc-container",
+    ]
+    for cls in toc_classes:
+        for el in soup.find_all(class_=cls):
+            el["style"] = _merge_inline_style(
+                el.get("style", ""),
+                "background: #f7f7f7; border: 1px solid #e0e0e0; border-radius: 8px; "
+                "padding: 20px 24px; margin-bottom: 28px; "
+                "display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start;"
+            )
+
+    # Generic detection: a div whose direct children are a heading + a list,
+    # and the heading text looks like "Contents" / "內容" / "目录"
+    toc_headings = {"內容", "内容", "目录", "Contents", "Table of Contents", "目次"}
+    for div in soup.find_all("div"):
+        heading = div.find(["h2", "h3", "h4", "p", "strong"])
+        if not heading:
+            continue
+        heading_text = heading.get_text(strip=True)
+        if heading_text not in toc_headings:
+            continue
+        lst = div.find(["ul", "ol"])
+        if not lst:
+            continue
+        # Looks like a TOC — apply box styling if not already styled
+        current_style = div.get("style", "")
+        if "background" not in current_style:
+            div["style"] = _merge_inline_style(
+                current_style,
+                "background: #f7f7f7; border: 1px solid #e0e0e0; border-radius: 8px; "
+                "padding: 20px 24px; margin-bottom: 28px;"
+            )
+        # Remove list-style from the TOC links list
+        lst["style"] = _merge_inline_style(
+            lst.get("style", ""),
+            "list-style: none; padding: 0; margin: 0;"
+        )
+
+
 def _apply_pagebuilder_layout_styles(soup: BeautifulSoup) -> None:
     """Apply critical Magento Page Builder layout styles directly as inline styles.
 
@@ -539,6 +820,8 @@ def _apply_pagebuilder_layout_styles(soup: BeautifulSoup) -> None:
 
     _apply_background_image_styles(soup)
     _apply_slider_fallback_layout(soup)
+    _apply_product_listing_layout(soup)
+    _apply_toc_layout(soup)
 
 
 def process_html_for_builder(html_content: str) -> str:
