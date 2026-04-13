@@ -110,15 +110,21 @@ def _screenshot_url(url: str, viewport_width: int = 1440, viewport_height: int =
             # Progressive scroll to trigger lazy-loading of ALL sections
             page.wait_for_timeout(2000)
             page.evaluate("""
-                async function scrollFull() {
+                (() => {
                     const totalH = document.body.scrollHeight;
-                    for (let y = 0; y < totalH; y += 600) {
-                        window.scrollTo(0, y);
-                        await new Promise(r => setTimeout(r, 200));
-                    }
-                    window.scrollTo(0, 0);
-                }
-                scrollFull();
+                    const steps = Math.ceil(totalH / 600);
+                    let i = 0;
+                    const tick = () => {
+                        if (i < steps) {
+                            window.scrollTo(0, i * 600);
+                            i++;
+                            setTimeout(tick, 200);
+                        } else {
+                            window.scrollTo(0, 0);
+                        }
+                    };
+                    tick();
+                })();
             """)
             page.wait_for_timeout(3000)
 
