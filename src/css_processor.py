@@ -167,17 +167,23 @@ mark { padding: 2px 4px; }
     flex-wrap: nowrap !important;
     gap: 0 !important;
 }
-/* Each real slide becomes a flex child */
+/* Each real slide becomes a flex child — 5 per row for product carousels */
 .slick-slide {
     display: block !important;
     visibility: visible !important;
     opacity: 1 !important;
     flex: 0 0 calc((100% - 64px) / 5) !important;
+    width: calc((100% - 64px) / 5) !important;
     min-width: 0 !important;
     max-width: none !important;
     scroll-snap-align: start;
     box-sizing: border-box;
-    padding: 0 8px;
+    padding: 0;
+}
+/* Slick wraps each slide content in a plain div — allow it to fill */
+.slick-slide > div {
+    width: 100% !important;
+    height: 100% !important;
 }
 /* Clones were removed in JS; just in case some remain, hide them */
 .slick-cloned {
@@ -1157,19 +1163,25 @@ def _wrap_carousel_with_arrows(soup: BeautifulSoup, container, container_id: str
     if container.parent and "product-carousel-wrapper" in (container.parent.get("class") or []):
         return
 
+    # Scroll the .slick-list (if present) else the container itself.
+    # querySelector('.slick-list') handles Slick DOM; fallback is the element itself.
     scroll_fn_next = (
-        f"var o=document.getElementById('{container_id}');"
+        f"var c=document.getElementById('{container_id}');"
+        "var o=c&&(c.querySelector('.slick-list')||c);"
         "if(o)o.scrollBy({left:o.clientWidth*0.9,behavior:'smooth'})"
     )
     scroll_fn_prev = (
-        f"var o=document.getElementById('{container_id}');"
+        f"var c=document.getElementById('{container_id}');"
+        "var o=c&&(c.querySelector('.slick-list')||c);"
         "if(o)o.scrollBy({left:-o.clientWidth*0.9,behavior:'smooth'})"
     )
 
     wrapper_style = (
         "position: relative; width: 100%; "
-        "margin: 0 0 24px 0; padding: 0 0 0 0; box-sizing: border-box;"
+        "margin: 0 0 24px 0; padding: 0 40px; box-sizing: border-box;"
     )
+    # The scroll target is the INNER container (.slick-list or the ol itself),
+    # so scrollBy always operates on the correct element.
     wrapper = soup.new_tag("div", attrs={
         "class": "product-carousel-wrapper",
         "style": wrapper_style,
@@ -1188,7 +1200,7 @@ def _wrap_carousel_with_arrows(soup: BeautifulSoup, container, container_id: str
         "class": "carousel-arrow carousel-prev",
         "onclick": scroll_fn_prev,
         "aria-label": "Previous",
-        "style": arrow_base + " left: -4px;",
+        "style": arrow_base + " left: 2px;",
     })
     prev_btn.string = "\u2039"  # ‹
 
@@ -1197,7 +1209,7 @@ def _wrap_carousel_with_arrows(soup: BeautifulSoup, container, container_id: str
         "class": "carousel-arrow carousel-next",
         "onclick": scroll_fn_next,
         "aria-label": "Next",
-        "style": arrow_base + " right: -4px;",
+        "style": arrow_base + " right: 2px;",
     })
     next_btn.string = "\u203a"  # ›
 
@@ -1222,10 +1234,17 @@ def _apply_slick_carousel_layout(soup: BeautifulSoup) -> None:
     for slick_el in soup.find_all(class_=lambda c: c and (
         "slick-initialized" in c or "slick-slider" in c
     )):
-        # Detect column count from the data attribute we set in JS
-        active_count = _safe_int(slick_el.get("data-pc-carousel-count", "0"), 0)
-        if not active_count:
+        # Is this a product carousel?
+        is_product_carousel = bool(slick_el.find(class_=lambda c: c and any(
+            k in c for k in ("product-item", "product-info", "product-item-info")
+        )))
+
+        # Column count: for product carousels always use 5 (matches the original
+        # Pricerite layout).  For other sliders use however many were active.
+        if is_product_carousel:
             active_count = 5
+        else:
+            active_count = _safe_int(slick_el.get("data-pc-carousel-count", "0"), 0) or 1
 
         gap_px = 16
         slide_width = f"calc((100% - {(active_count - 1) * gap_px}px) / {active_count})"
