@@ -47,6 +47,8 @@ _PLAYWRIGHT_EXTRACTION_JS = r"""
         '#cookie-status',
         '.page-title-wrapper',
         '.sidebar', '.sidebar-main',
+        /* Slick navigation — these become raw text "Previous"/"Next" without CSS */
+        '.slick-prev', '.slick-next', '.slick-arrow', '.slick-dots',
     ];
     REMOVE.forEach(sel => {
         try { document.querySelectorAll(sel).forEach(el => el.remove()); } catch(e) {}
@@ -67,56 +69,118 @@ _PLAYWRIGHT_EXTRACTION_JS = r"""
     for (const sel of CANDIDATES) {
         try {
             const el = document.querySelector(sel);
-            if (el && el.innerText.trim().length > 300) { container = el; break; }
+            if (el && el.innerText.trim().length > 100) { container = el; break; }
         } catch(e) {}
     }
     if (!container) return null;
 
-    /* === 2.5 Reset JS-carousel state so computed styles are clean ===
-       Slick/Swiper set overflow:hidden + absolute positioning on their containers.
-       We reset them to normal flow BEFORE capturing computed styles, so the
-       Python CSS processor can apply scroll-snap carousel layout instead.
+    /* === 2.3 Un-Slick product carousels ===
+       Slick.js replaces  <ol class="product-items"><li>…</li></ol>
+       with a complex .slick-slider > .slick-list > .slick-track > .slick-slide
+       structure that includes clone slides for infinite scrolling.
+
+       We reverse this: collect the REAL (non-clone) product <li> items and
+       rebuild a clean <ol class="products list items product-items"> so the
+       Python CSS processor's scroll-snap carousel rules can apply correctly.
     */
-    const CAROUSEL_CONTAINERS = [
-        '.slick-slider', '.slick-list', '.slick-track',
+    try {
+        container.querySelectorAll(
+            '.slick-initialized, .slick-slider'
+        ).forEach(slickEl => {
+            /* Only process if this is a product carousel */
+            const hasProducts = slickEl.querySelector(
+                'li.product-item, li.item.product, li[class*="product"]'
+            );
+            if (!hasProducts) return;
+
+            /* How many items are visible at once? */
+            const wrapper = slickEl.closest('[data-content-type="products"]') || slickEl;
+            let carouselCount = parseInt(
+                wrapper.getAttribute('data-pc-carousel-count') ||
+                wrapper.getAttribute('data-carousel-count') || '0', 10
+            );
+            if (!carouselCount) {
+                carouselCount = slickEl.querySelectorAll(
+                    '.slick-active:not(.slick-cloned)'
+                ).length || 4;
+            }
+
+            /* Collect real (non-clone) product items */
+            const realItems = [];
+            slickEl.querySelectorAll(
+                '.slick-slide:not(.slick-cloned)'
+            ).forEach(slide => {
+                slide.querySelectorAll(
+                    'li.product-item, li.item.product, li[class*="product"]'
+                ).forEach(li => {
+                    /* Reset any inline positioning Slick added to the li */
+                    li.style.removeProperty('position');
+                    li.style.removeProperty('opacity');
+                    li.style.removeProperty('visibility');
+                    li.style.removeProperty('display');
+                    li.style.removeProperty('width');
+                    realItems.push(li.cloneNode(true));
+                });
+            });
+
+            if (realItems.length === 0) return;
+
+            /* Build clean ol.product-items */
+            const ol = document.createElement('ol');
+            ol.className = 'products list items product-items';
+            ol.setAttribute('data-pc-carousel-count', String(carouselCount));
+            realItems.forEach(li => ol.appendChild(li));
+
+            /* Replace the whole wrapper (data-content-type="products" or slick root) */
+            if (wrapper.parentNode) {
+                wrapper.parentNode.insertBefore(ol, wrapper);
+                wrapper.remove();
+            }
+        });
+    } catch(e) {}
+
+    /* === 2.4 Clean non-product image sliders ===
+       For banner/image sliders (no product items inside), just remove
+       clone slides and reset Slick's track transform so all real slides
+       are accessible in a horizontal scroll.
+    */
+    try {
+        container.querySelectorAll('.slick-initialized, .slick-slider').forEach(slickEl => {
+            /* Remove clone duplicates */
+            slickEl.querySelectorAll('.slick-cloned').forEach(el => el.remove());
+            /* Reset track width/transform so slides don't get clipped */
+            const track = slickEl.querySelector('.slick-track');
+            if (track) {
+                track.style.removeProperty('width');
+                track.style.removeProperty('transform');
+                track.style.removeProperty('transition');
+                track.style.removeProperty('will-change');
+            }
+            /* Allow slides to be visible */
+            slickEl.querySelectorAll('.slick-slide').forEach(slide => {
+                slide.style.removeProperty('width');
+                slide.style.removeProperty('position');
+                slide.style.setProperty('opacity', '1', 'important');
+                slide.style.setProperty('visibility', 'visible', 'important');
+            });
+        });
+    } catch(e) {}
+
+    /* === 2.5 Reset any remaining carousel overflow:hidden ===
+       After un-Slicking, some wrappers may still have overflow:hidden
+       from their original Magento class CSS. Clear it so nothing clips.
+    */
+    [
         '[data-content-type="slider"]',
         '[data-content-type="products"]',
         '.widget.block-products-list',
-        'ol.product-items', 'ul.product-items',
-        '.products-grid', '.products-list',
-    ];
-    CAROUSEL_CONTAINERS.forEach(sel => {
+    ].forEach(sel => {
         try {
             container.querySelectorAll(sel).forEach(el => {
                 el.style.setProperty('overflow', 'visible', 'important');
-                el.style.setProperty('overflow-x', 'visible', 'important');
-                el.style.setProperty('transform', 'none', 'important');
-                if (el.style.position === 'absolute' || el.style.position === 'relative') {
-                    el.style.setProperty('position', 'static', 'important');
-                }
             });
         } catch(e) {}
     });
-    // Show all hidden Slick slides
-    try {
-        container.querySelectorAll('.slick-slide').forEach(slide => {
-            slide.style.setProperty('display', 'block', 'important');
-            slide.style.setProperty('opacity', '1', 'important');
-            slide.style.setProperty('visibility', 'visible', 'important');
-            slide.style.setProperty('position', 'static', 'important');
-        });
-    } catch(e) {}
-    // Show all hidden product items
-    try {
-        container.querySelectorAll('ol.product-items li, ul.product-items li').forEach(item => {
-            if (window.getComputedStyle(item).display === 'none') {
-                item.style.setProperty('display', 'block', 'important');
-            }
-            item.style.setProperty('position', 'static', 'important');
-            item.style.setProperty('opacity', '1', 'important');
-            item.style.setProperty('visibility', 'visible', 'important');
-        });
-    } catch(e) {}
 
     /* === 3. Apply computed layout styles as inline attributes ===
        We capture only properties that are:

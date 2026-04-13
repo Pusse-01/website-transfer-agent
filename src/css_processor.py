@@ -725,6 +725,69 @@ def _apply_slider_fallback_layout(soup: BeautifulSoup) -> None:
             slide["style"] = s
 
 
+def _unslick_product_carousels(soup: BeautifulSoup) -> None:
+    """Python-side fallback un-Slick for product carousels.
+
+    When Playwright isn't used (GraphQL/HTML fallback), the raw CMS content
+    may already contain a .slick-initialized structure if it was serialized
+    from a cached render.  This function reconstructs the clean
+    ol.product-items list from the Slick DOM, mirroring the JS step.
+
+    Also removes Slick navigation buttons that appear as plain text without CSS.
+    """
+    # Remove Slick nav buttons — without CSS they render as "Previous"/"Next" text
+    for sel in (".slick-prev", ".slick-next", ".slick-arrow", ".slick-dots"):
+        for el in soup.select(sel):
+            el.decompose()
+
+    # Un-Slick product carousels
+    for slick_el in soup.select(".slick-initialized, .slick-slider"):
+        # Only act on product carousels
+        if not slick_el.find(class_=lambda c: c and "product-item" in c):
+            continue
+
+        # Determine carousel count from wrapper attribute
+        wrapper = (
+            slick_el.find_parent(attrs={"data-content-type": "products"})
+            or slick_el
+        )
+        carousel_count = _safe_int(
+            (wrapper.get("data-pc-carousel-count") or wrapper.get("data-carousel-count")), 4
+        )
+
+        # Collect real (non-clone) product items
+        real_items = []
+        for slide in slick_el.find_all(class_=lambda c: c and "slick-slide" in c):
+            classes = slide.get("class", [])
+            if "slick-cloned" in classes:
+                continue
+            for li in slide.find_all("li", class_=lambda c: c and "product-item" in c):
+                # Strip Slick inline positioning from the li
+                li_style = li.get("style", "")
+                for prop in ("position", "opacity", "visibility", "width"):
+                    li_style = re.sub(
+                        rf'(?:^|(?<=;))\s*{prop}\s*:[^;]+;?', '', li_style
+                    ).strip()
+                li["style"] = li_style
+                real_items.append(li.__copy__())
+
+        if not real_items:
+            continue
+
+        # Build clean ol.product-items
+        new_ol = soup.new_tag("ol", attrs={
+            "class": "products list items product-items",
+            "data-pc-carousel-count": str(carousel_count),
+        })
+        for li in real_items:
+            new_ol.append(li)
+
+        # Replace wrapper
+        parent = wrapper.parent if wrapper.parent else slick_el.parent
+        if parent:
+            wrapper.replace_with(new_ol)
+
+
 def _apply_product_listing_layout(soup: BeautifulSoup) -> None:
     """Convert Magento product listing to horizontal scroll-snap carousel.
 
@@ -928,6 +991,7 @@ def _apply_pagebuilder_layout_styles(soup: BeautifulSoup) -> None:
         el["style"] = _merge_inline_style(el.get("style", ""), "margin-bottom: 0; word-wrap: break-word")
 
     _apply_background_image_styles(soup)
+    _unslick_product_carousels(soup)   # must run before _apply_product_listing_layout
     _apply_slider_fallback_layout(soup)
     _apply_product_listing_layout(soup)
     _apply_toc_layout(soup)
