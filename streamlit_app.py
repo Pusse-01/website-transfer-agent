@@ -1305,10 +1305,10 @@ img{{max-width:100%;height:auto}} a{{color:#236fa1}} p{{margin-bottom:10px}}
                     sc_col1, sc_col2 = st.columns(2)
                     with sc_col1:
                         st.markdown("**Original Screenshot**")
-                        st.image(ai_result["orig_screenshot"], use_container_width=True)
+                        st.image(ai_result["orig_screenshot"], width="stretch")
                     with sc_col2:
                         st.markdown("**Scraped Screenshot**")
-                        st.image(ai_result["scraped_screenshot"], use_container_width=True)
+                        st.image(ai_result["scraped_screenshot"], width="stretch")
 
                 differences = ai_result.get("differences", [])
                 if differences:

@@ -265,6 +265,7 @@ def _run_playwright_scrape(url: str, base_url: str = "") -> dict | None:
         return None
 
 
+class BlogScraper:
     """Scrapes blog content from a Magento website with Amasty Blog."""
 
     def __init__(self, base_url: str, blog_path: str = "/blog/"):
