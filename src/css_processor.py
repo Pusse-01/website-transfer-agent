@@ -138,10 +138,42 @@ mark { padding: 2px 4px; }
 
 /* -------------------------------------------------------
    Magento Product Listing (widget / products block)
-   Horizontal scroll-snap carousel — 4 items visible at once,
-   drag/swipe to reveal more.  Matches the original JS carousel
-   experience without requiring JavaScript.
+   Horizontal scroll-snap carousel — 5 items visible at once,
+   drag/swipe (or prev/next arrows) to reveal more.  Matches
+   the original JS carousel experience without requiring Slick.
    ------------------------------------------------------- */
+.product-carousel-wrapper {
+    position: relative;
+    width: 100%;
+    margin: 0 0 24px 0;
+    box-sizing: border-box;
+}
+.carousel-arrow {
+    position: absolute;
+    top: 45%;
+    transform: translateY(-50%);
+    z-index: 5;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: #50b748;
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    font-size: 20px;
+    line-height: 1;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    padding: 0;
+}
+.carousel-arrow:hover {
+    background: #3f9b3a;
+}
+.carousel-prev { left: -4px; }
+.carousel-next { right: -4px; }
 .products.list.items,
 ol.product-items,
 ul.product-items {
@@ -153,41 +185,101 @@ ul.product-items {
     gap: 16px;
     list-style: none !important;
     padding: 0 0 12px 0 !important;
-    margin: 0 0 24px 0 !important;
+    margin: 0 !important;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: thin;
     scrollbar-color: #bbb #f0f0f0;
+    width: 100%;
 }
 .product-item {
-    flex: 0 0 calc(25% - 12px) !important;
+    flex: 0 0 calc((100% - 64px) / 5) !important;
     min-width: 0;
     scroll-snap-align: start;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
+    position: relative;
     border: 1px solid #e8e8e8;
     border-radius: 8px;
     overflow: hidden;
     background: #fff;
+    opacity: 1 !important;
+    visibility: visible !important;
+    padding: 0;
+    margin: 0;
 }
 .product-item-info {
+    position: relative;
     display: flex;
     flex-direction: column;
+    width: 100%;
     height: 100%;
 }
 .product-item-photo {
     display: block;
-    text-align: center;
-    padding: 12px;
-    background: #fafafa;
+    width: 100%;
+    padding: 0;
+    text-decoration: none;
+    position: relative;
+}
+.product-image-container {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    position: relative;
+}
+.product-image-wrapper {
+    display: block !important;
+    position: relative !important;
+    height: 0 !important;
+    padding-bottom: 100%;
+    overflow: hidden !important;
+    background: #f5f5f5;
+    width: 100%;
 }
 .product-item-photo img,
+.product-image-wrapper img,
 .product-item-photo .product-image-photo {
-    max-width: 100% !important;
-    height: 160px !important;
-    object-fit: contain;
-    display: block;
-    margin: 0 auto;
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: contain !important;
+    display: block !important;
+    margin: 0 !important;
+    transition: opacity 0.3s ease;
+}
+/* Two-image hover swap — the SECOND img in .product-item-photo fades in on hover */
+.product-item-photo img + img,
+.product-image-wrapper img + img,
+.product-item-photo .product-image-photo-hover,
+.product-item-photo .product-image-photo.photo-hover,
+.product-item-photo .hover-image {
+    opacity: 0;
+    z-index: 2;
+}
+.product-item:hover .product-item-photo img + img,
+.product-item:hover .product-image-wrapper img + img,
+.product-item:hover .product-item-photo .product-image-photo-hover,
+.product-item:hover .product-item-photo .product-image-photo.photo-hover,
+.product-item:hover .product-item-photo .hover-image {
+    opacity: 1;
+}
+.product-item:hover .product-item-photo img:first-child,
+.product-item:hover .product-image-wrapper img:first-child {
+    opacity: 0;
+}
+/* Hide action buttons that would overlap the image without JS */
+.product-item-actions,
+.product-item .actions-primary,
+.product-item .actions-secondary,
+.product-item .action.tocart,
+.product-item .action.towishlist,
+.product-item .action.tocompare,
+.product-item .action-towishlist,
+.product-item .action-tocompare {
+    display: none !important;
 }
 .product-item-details {
     padding: 10px 12px 12px;
@@ -792,22 +884,42 @@ def _apply_product_listing_layout(soup: BeautifulSoup) -> None:
     """Convert Magento product listing to horizontal scroll-snap carousel.
 
     Magento product widgets render as <ol class="products list items product-items">.
-    We convert this to a CSS horizontal scroll-snap so items are scrollable
-    exactly like the original JS carousel — no JavaScript required.
+    We convert this to a horizontal scroll carousel with prev/next arrows,
+    matching the original JS carousel experience.
+
+    Each product card has a complex structure:
+        li.product-item
+          > div.product-item-info
+            > a.product-item-photo
+              > span.product-image-container
+                > span.product-image-wrapper  (padding-bottom ratio trick)
+                  > img.product-image-photo    (needs position: absolute)
+            > div.product-item-details
+              > div.product-item-actions       (overlaps image if not hidden)
+
+    We must set inline styles on every one of these so the intrinsic-ratio
+    image container renders correctly without external CSS.
     """
     # Target any <ol> or <ul> that has the Magento product-items class
     for container in soup.find_all(["ol", "ul"], class_=lambda c: c and "product-items" in c):
-        # Detect carousel column count from a parent data attribute if available
-        parent = container.parent
-        carousel_count = 4  # default: 4 items visible (matching original carousel)
-        if parent:
+        # Detect carousel count — check BOTH the container itself AND its parent.
+        # (Our Playwright un-Slick step sets data-pc-carousel-count on the ol itself.)
+        carousel_count = 0
+        for target in (container, container.parent):
+            if not target:
+                continue
             for attr in ("data-pc-carousel-count", "data-carousel-count", "data-items-per-page"):
-                val = parent.get(attr) or parent.get(attr.replace("-", "_"), "")
+                val = target.get(attr) or target.get(attr.replace("-", "_"), "")
                 if val:
-                    carousel_count = _safe_int(val, 4)
+                    carousel_count = _safe_int(val, 0)
                     break
+            if carousel_count:
+                break
+        if not carousel_count:
+            carousel_count = 5  # sensible default for Magento carousels
 
-        item_width = f"calc((100% - {(carousel_count - 1) * 16}px) / {carousel_count})"
+        gap_px = 16
+        item_width = f"calc((100% - {(carousel_count - 1) * gap_px}px) / {carousel_count})"
 
         # Force horizontal scroll-snap — use _set_inline_style_property to
         # OVERRIDE any overflow:hidden or positioning set by JS carousel
@@ -817,29 +929,161 @@ def _apply_product_listing_layout(soup: BeautifulSoup) -> None:
         s = _set_inline_style_property(s, "overflow-x", "auto")
         s = _set_inline_style_property(s, "overflow-y", "visible")
         s = _set_inline_style_property(s, "scroll-snap-type", "x mandatory")
-        s = _set_inline_style_property(s, "gap", "16px")
+        s = _set_inline_style_property(s, "gap", f"{gap_px}px")
         s = _set_inline_style_property(s, "list-style", "none")
         s = _set_inline_style_property(s, "padding", "0 0 12px 0")
-        s = _set_inline_style_property(s, "margin", "0 0 24px 0")
+        s = _set_inline_style_property(s, "margin", "0")
         s = _set_inline_style_property(s, "-webkit-overflow-scrolling", "touch")
+        s = _set_inline_style_property(s, "scrollbar-width", "thin")
+        s = _set_inline_style_property(s, "width", "100%")
         container["style"] = s
+        # Give it a unique id so the nav buttons can find it
+        container_id = container.get("id") or f"pc-items-{id(container) & 0xFFFFF:x}"
+        container["id"] = container_id
 
         for item in container.find_all("li", class_=lambda c: c and "product-item" in c):
             is_style = item.get("style", "")
             is_style = _set_inline_style_property(is_style, "flex", f"0 0 {item_width}")
             is_style = _set_inline_style_property(is_style, "min-width", "0")
+            is_style = _set_inline_style_property(is_style, "max-width", item_width)
+            is_style = _set_inline_style_property(is_style, "width", item_width)
             is_style = _set_inline_style_property(is_style, "scroll-snap-align", "start")
             is_style = _set_inline_style_property(is_style, "box-sizing", "border-box")
             is_style = _set_inline_style_property(is_style, "display", "flex")
             is_style = _set_inline_style_property(is_style, "flex-direction", "column")
-            is_style = _set_inline_style_property(is_style, "position", "static")
+            is_style = _set_inline_style_property(is_style, "position", "relative")
             is_style = _set_inline_style_property(is_style, "opacity", "1")
             is_style = _set_inline_style_property(is_style, "visibility", "visible")
             is_style = _set_inline_style_property(is_style, "border", "1px solid #e8e8e8")
             is_style = _set_inline_style_property(is_style, "border-radius", "8px")
             is_style = _set_inline_style_property(is_style, "overflow", "hidden")
             is_style = _set_inline_style_property(is_style, "background", "#fff")
+            is_style = _set_inline_style_property(is_style, "padding", "0")
+            is_style = _set_inline_style_property(is_style, "margin", "0")
             item["style"] = is_style
+
+            # Fix product-item-info — needs position: relative for absolute children
+            for info in item.find_all(class_="product-item-info"):
+                ss = info.get("style", "")
+                ss = _set_inline_style_property(ss, "position", "relative")
+                ss = _set_inline_style_property(ss, "display", "flex")
+                ss = _set_inline_style_property(ss, "flex-direction", "column")
+                ss = _set_inline_style_property(ss, "width", "100%")
+                ss = _set_inline_style_property(ss, "height", "100%")
+                info["style"] = ss
+
+            # Fix product-item-photo — block, full width, no weird padding
+            for photo in item.find_all(class_="product-item-photo"):
+                ss = photo.get("style", "")
+                ss = _set_inline_style_property(ss, "display", "block")
+                ss = _set_inline_style_property(ss, "width", "100%")
+                ss = _set_inline_style_property(ss, "padding", "0")
+                ss = _set_inline_style_property(ss, "text-decoration", "none")
+                photo["style"] = ss
+
+            # Fix product-image-container — override Magento's fixed pixel width
+            for img_c in item.find_all(class_="product-image-container"):
+                ss = img_c.get("style", "")
+                ss = _set_inline_style_property(ss, "display", "block")
+                ss = _set_inline_style_property(ss, "width", "100%")
+                ss = _set_inline_style_property(ss, "max-width", "100%")
+                ss = _set_inline_style_property(ss, "position", "relative")
+                img_c["style"] = ss
+
+            # Fix product-image-wrapper — the intrinsic-ratio trick container.
+            # Magento sets padding-bottom:X% inline to create the aspect ratio.
+            # We need position:relative + overflow:hidden so the absolute image works.
+            for img_w in item.find_all(class_="product-image-wrapper"):
+                ss = img_w.get("style", "")
+                # If no padding-bottom is set, default to 100% (square)
+                if "padding-bottom" not in ss and "padding:" not in ss.lower():
+                    ss = _set_inline_style_property(ss, "padding-bottom", "100%")
+                ss = _set_inline_style_property(ss, "display", "block")
+                ss = _set_inline_style_property(ss, "height", "0")
+                ss = _set_inline_style_property(ss, "position", "relative")
+                ss = _set_inline_style_property(ss, "overflow", "hidden")
+                ss = _set_inline_style_property(ss, "background", "#f5f5f5")
+                ss = _set_inline_style_property(ss, "width", "100%")
+                img_w["style"] = ss
+
+                # The <img> inside must be position: absolute to fill the ratio box
+                for img in img_w.find_all("img"):
+                    iss = img.get("style", "")
+                    iss = _set_inline_style_property(iss, "position", "absolute")
+                    iss = _set_inline_style_property(iss, "top", "0")
+                    iss = _set_inline_style_property(iss, "left", "0")
+                    iss = _set_inline_style_property(iss, "width", "100%")
+                    iss = _set_inline_style_property(iss, "height", "100%")
+                    iss = _set_inline_style_property(iss, "object-fit", "contain")
+                    iss = _set_inline_style_property(iss, "display", "block")
+                    iss = _set_inline_style_property(iss, "margin", "0")
+                    img["style"] = iss
+
+            # Two-image hover swap — the original site shows a SECOND image
+            # when the user hovers over a product.  Find all <img> inside the
+            # product-item-photo link and wire up inline onmouseover/onmouseout
+            # (pure CSS :hover is stripped by premailer when we inline styles).
+            for photo in item.find_all(class_="product-item-photo"):
+                imgs = photo.find_all("img")
+                if len(imgs) >= 2:
+                    primary, hover_img = imgs[0], imgs[1]
+                    # Stack the two images on top of each other; fade between them
+                    for im in (primary, hover_img):
+                        iss = im.get("style", "")
+                        iss = _set_inline_style_property(iss, "transition", "opacity 0.3s ease")
+                        im["style"] = iss
+                    # Hover image starts hidden
+                    hss = hover_img.get("style", "")
+                    hss = _set_inline_style_property(hss, "opacity", "0")
+                    hss = _set_inline_style_property(hss, "z-index", "2")
+                    hover_img["style"] = hss
+                    pss = primary.get("style", "")
+                    pss = _set_inline_style_property(pss, "opacity", "1")
+                    pss = _set_inline_style_property(pss, "z-index", "1")
+                    primary["style"] = pss
+                    # Inline JS on the item to toggle opacities.  We target by
+                    # position — the 1st and 2nd <img> descendants — so no IDs needed.
+                    mover = (
+                        "var i=this.querySelectorAll('.product-item-photo img');"
+                        "if(i.length>=2){i[0].style.opacity='0';i[1].style.opacity='1';}"
+                    )
+                    mout = (
+                        "var i=this.querySelectorAll('.product-item-photo img');"
+                        "if(i.length>=2){i[0].style.opacity='1';i[1].style.opacity='0';}"
+                    )
+                    item["onmouseover"] = mover
+                    item["onmouseout"] = mout
+
+            # Hide action buttons that would overlap the image without JS hover
+            for actions in item.find_all(class_=lambda c: c and (
+                "product-item-actions" in c
+                or "actions-primary" in c
+                or "actions-secondary" in c
+                or "action-towishlist" in c
+                or "action-tocompare" in c
+            )):
+                ss = actions.get("style", "")
+                ss = _set_inline_style_property(ss, "display", "none")
+                actions["style"] = ss
+            # Also remove tocart / towishlist / tocompare buttons by action class
+            for btn in item.find_all(class_=lambda c: c and any(
+                k in c for k in ("tocart", "towishlist", "tocompare", "action-primary")
+            )):
+                ss = btn.get("style", "")
+                ss = _set_inline_style_property(ss, "display", "none")
+                btn["style"] = ss
+
+            # Fix product-item-details — normal block flow
+            for details in item.find_all(class_="product-item-details"):
+                ss = details.get("style", "")
+                ss = _set_inline_style_property(ss, "padding", "10px 12px 12px")
+                ss = _set_inline_style_property(ss, "display", "flex")
+                ss = _set_inline_style_property(ss, "flex-direction", "column")
+                ss = _set_inline_style_property(ss, "flex", "1")
+                details["style"] = ss
+
+        # Wrap the ol in a div with prev/next navigation arrows
+        _wrap_carousel_with_arrows(soup, container, container_id)
 
     # Also handle [data-content-type="products"] wrapper — ensure it doesn't clip the carousel
     for el in soup.find_all(attrs={"data-content-type": "products"}):
@@ -847,6 +1091,68 @@ def _apply_product_listing_layout(soup: BeautifulSoup) -> None:
         s = _set_inline_style_property(s, "width", "100%")
         s = _set_inline_style_property(s, "overflow", "visible")
         el["style"] = s
+
+
+def _wrap_carousel_with_arrows(soup: BeautifulSoup, container, container_id: str) -> None:
+    """Wrap *container* (ol.product-items) in a div with prev/next arrow buttons.
+
+    Uses minimal onclick JS that scrolls the container horizontally by 80%
+    of its visible width — one "page" of the carousel.  No external JS lib.
+    """
+    # Don't wrap twice
+    if container.parent and "product-carousel-wrapper" in (container.parent.get("class") or []):
+        return
+
+    scroll_fn_next = (
+        f"var o=document.getElementById('{container_id}');"
+        "if(o)o.scrollBy({left:o.clientWidth*0.9,behavior:'smooth'})"
+    )
+    scroll_fn_prev = (
+        f"var o=document.getElementById('{container_id}');"
+        "if(o)o.scrollBy({left:-o.clientWidth*0.9,behavior:'smooth'})"
+    )
+
+    wrapper_style = (
+        "position: relative; width: 100%; "
+        "margin: 0 0 24px 0; padding: 0 0 0 0; box-sizing: border-box;"
+    )
+    wrapper = soup.new_tag("div", attrs={
+        "class": "product-carousel-wrapper",
+        "style": wrapper_style,
+    })
+
+    arrow_base = (
+        "position: absolute; top: 45%; transform: translateY(-50%); "
+        "z-index: 5; width: 36px; height: 36px; border-radius: 50%; "
+        "background: #50b748; color: #ffffff; border: none; cursor: pointer; "
+        "font-size: 20px; line-height: 1; font-weight: 700; "
+        "display: flex; align-items: center; justify-content: center; "
+        "box-shadow: 0 2px 8px rgba(0,0,0,0.18); padding: 0;"
+    )
+    prev_btn = soup.new_tag("button", attrs={
+        "type": "button",
+        "class": "carousel-arrow carousel-prev",
+        "onclick": scroll_fn_prev,
+        "aria-label": "Previous",
+        "style": arrow_base + " left: -4px;",
+    })
+    prev_btn.string = "\u2039"  # ‹
+
+    next_btn = soup.new_tag("button", attrs={
+        "type": "button",
+        "class": "carousel-arrow carousel-next",
+        "onclick": scroll_fn_next,
+        "aria-label": "Next",
+        "style": arrow_base + " right: -4px;",
+    })
+    next_btn.string = "\u203a"  # ›
+
+    # Replace container with wrapper, then move container inside wrapper
+    container.insert_before(wrapper)
+    wrapper.append(prev_btn)
+    container.extract()
+    wrapper.append(container)
+    wrapper.append(next_btn)
 
 
 def _apply_toc_layout(soup: BeautifulSoup) -> None:
