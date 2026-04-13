@@ -63,6 +63,8 @@ def _screenshot_url(url: str, viewport_width: int = 1440, viewport_height: int =
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--disable-features=VizDisplayCompositor",
                 ],
             )
             ctx = browser.new_context(
@@ -74,20 +76,52 @@ def _screenshot_url(url: str, viewport_width: int = 1440, viewport_height: int =
                 ),
                 locale="zh-HK",
                 extra_http_headers={"Accept-Language": "zh-HK,zh;q=0.9,en;q=0.8"},
+                java_script_enabled=True,
+                bypass_csp=True,
             )
             page = ctx.new_page()
             # Hide automation flag
             page.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                "Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});"
+                "Object.defineProperty(navigator, 'languages', {get: () => ['zh-HK','zh','en']});"
             )
-            page.goto(url, wait_until="networkidle", timeout=60_000)
-            # Wait for lazy-loaded images and carousel JS to finish
-            page.wait_for_timeout(4000)
-            # Scroll to trigger lazy loading then back to top
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
-            page.wait_for_timeout(1500)
-            page.evaluate("window.scrollTo(0, 0)")
-            page.wait_for_timeout(500)
+            try:
+                page.goto(url, wait_until="networkidle", timeout=60_000)
+            except Exception:
+                # If networkidle times out, try domcontentloaded
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+
+            # Dismiss cookie consent banners
+            for dismiss_sel in [
+                ".cookie-notice .action-dismiss",
+                ".cookie-consent button",
+                "#cookie-accept",
+                ".accept-cookies",
+                "button[data-role='accept-btn']",
+            ]:
+                try:
+                    page.click(dismiss_sel, timeout=800)
+                    page.wait_for_timeout(300)
+                    break
+                except Exception:
+                    pass
+
+            # Progressive scroll to trigger lazy-loading of ALL sections
+            page.wait_for_timeout(2000)
+            page.evaluate("""
+                async function scrollFull() {
+                    const totalH = document.body.scrollHeight;
+                    for (let y = 0; y < totalH; y += 600) {
+                        window.scrollTo(0, y);
+                        await new Promise(r => setTimeout(r, 200));
+                    }
+                    window.scrollTo(0, 0);
+                }
+                scrollFull();
+            """)
+            page.wait_for_timeout(3000)
+
             data = page.screenshot(full_page=True, type="png")
             browser.close()
             return data
@@ -454,9 +488,9 @@ class VisualQA:
                 "error": str(exc),
             }
 
-    def apply_fixes(self, html: str, additional_css: str) -> str:
+    def apply_fixes(self, html: str, additional_css: str, force_important: bool = True) -> str:
         """Return *html* with *additional_css* injected."""
-        return apply_css_fixes(html, additional_css)
+        return apply_css_fixes(html, additional_css, force_important=force_important)
 
     def screenshot_url(self, url: str) -> Optional[bytes]:
         """Public wrapper for URL screenshot."""

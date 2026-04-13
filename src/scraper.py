@@ -72,6 +72,52 @@ _PLAYWRIGHT_EXTRACTION_JS = r"""
     }
     if (!container) return null;
 
+    /* === 2.5 Reset JS-carousel state so computed styles are clean ===
+       Slick/Swiper set overflow:hidden + absolute positioning on their containers.
+       We reset them to normal flow BEFORE capturing computed styles, so the
+       Python CSS processor can apply scroll-snap carousel layout instead.
+    */
+    const CAROUSEL_CONTAINERS = [
+        '.slick-slider', '.slick-list', '.slick-track',
+        '[data-content-type="slider"]',
+        '[data-content-type="products"]',
+        '.widget.block-products-list',
+        'ol.product-items', 'ul.product-items',
+        '.products-grid', '.products-list',
+    ];
+    CAROUSEL_CONTAINERS.forEach(sel => {
+        try {
+            container.querySelectorAll(sel).forEach(el => {
+                el.style.setProperty('overflow', 'visible', 'important');
+                el.style.setProperty('overflow-x', 'visible', 'important');
+                el.style.setProperty('transform', 'none', 'important');
+                if (el.style.position === 'absolute' || el.style.position === 'relative') {
+                    el.style.setProperty('position', 'static', 'important');
+                }
+            });
+        } catch(e) {}
+    });
+    // Show all hidden Slick slides
+    try {
+        container.querySelectorAll('.slick-slide').forEach(slide => {
+            slide.style.setProperty('display', 'block', 'important');
+            slide.style.setProperty('opacity', '1', 'important');
+            slide.style.setProperty('visibility', 'visible', 'important');
+            slide.style.setProperty('position', 'static', 'important');
+        });
+    } catch(e) {}
+    // Show all hidden product items
+    try {
+        container.querySelectorAll('ol.product-items li, ul.product-items li').forEach(item => {
+            if (window.getComputedStyle(item).display === 'none') {
+                item.style.setProperty('display', 'block', 'important');
+            }
+            item.style.setProperty('position', 'static', 'important');
+            item.style.setProperty('opacity', '1', 'important');
+            item.style.setProperty('visibility', 'visible', 'important');
+        });
+    } catch(e) {}
+
     /* === 3. Apply computed layout styles as inline attributes ===
        We capture only properties that are:
        (a) layout-critical (flex, grid, background, border)
@@ -120,6 +166,8 @@ _PLAYWRIGHT_EXTRACTION_JS = r"""
             if (!val || SKIP_VALUES.has(val)) continue;
             if (prop === 'display' && SKIP_DISPLAY.has(val)) continue;
             if (prop === 'background-image' && val === 'none') continue;
+            // Don't capture overflow:hidden from carousel wrappers — Python will set scroll-snap
+            if ((prop === 'overflow' || prop === 'overflow-x') && val === 'hidden') continue;
             decls.push(prop + ': ' + val);
         }
 

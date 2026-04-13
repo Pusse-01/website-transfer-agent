@@ -57,7 +57,16 @@ PAGEBUILDER_BASE_CSS = """
     box-sizing: border-box;
 }
 .pagebuilder-slider {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    scroll-snap-type: x mandatory;
     width: 100%;
+    -webkit-overflow-scrolling: touch;
+}
+.pagebuilder-slider > * {
+    scroll-snap-align: start;
+    flex-shrink: 0 !important;
 }
 [data-content-type="text"] {
     margin-bottom: 0;
@@ -129,20 +138,30 @@ mark { padding: 2px 4px; }
 
 /* -------------------------------------------------------
    Magento Product Listing (widget / products block)
-   Converts vertical list → 4-column card grid matching
-   the original carousel's per-slide item count.
+   Horizontal scroll-snap carousel — 4 items visible at once,
+   drag/swipe to reveal more.  Matches the original JS carousel
+   experience without requiring JavaScript.
    ------------------------------------------------------- */
 .products.list.items,
 ol.product-items,
 ul.product-items {
-    display: grid !important;
-    grid-template-columns: repeat(4, 1fr);
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    overflow-y: visible !important;
+    scroll-snap-type: x mandatory;
     gap: 16px;
     list-style: none !important;
-    padding: 0 !important;
+    padding: 0 0 12px 0 !important;
     margin: 0 0 24px 0 !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: #bbb #f0f0f0;
 }
 .product-item {
+    flex: 0 0 calc(25% - 12px) !important;
+    min-width: 0;
+    scroll-snap-align: start;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -327,15 +346,45 @@ ol.product-items li::before {
 }
 
 /* -------------------------------------------------------
-   Responsive: adapt product grid to screen size
+   Slider / Carousel containers
+   ------------------------------------------------------- */
+[data-content-type="slider"],
+.slick-slider,
+.carousel-container {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    overflow-y: visible !important;
+    scroll-snap-type: x mandatory;
+    width: 100%;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: #bbb #f0f0f0;
+    padding-bottom: 8px;
+}
+[data-content-type="slider"] > *,
+.slick-slider > .slick-list,
+.slick-list > .slick-track > .slick-slide {
+    scroll-snap-align: start;
+    flex-shrink: 0 !important;
+    position: static !important;
+    display: flex !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+}
+
+/* -------------------------------------------------------
+   Responsive: adapt product carousel item size on small screens
    ------------------------------------------------------- */
 @media (max-width: 900px) {
-    .products.list.items,
-    ol.product-items { grid-template-columns: repeat(3, 1fr) !important; }
+    .product-item {
+        flex: 0 0 calc(33.33% - 11px) !important;
+    }
 }
 @media (max-width: 600px) {
-    .products.list.items,
-    ol.product-items { grid-template-columns: repeat(2, 1fr) !important; }
+    .product-item {
+        flex: 0 0 calc(50% - 8px) !important;
+    }
 }
 """
 
@@ -627,66 +676,114 @@ def _apply_background_image_styles(soup: BeautifulSoup) -> None:
 
 
 def _apply_slider_fallback_layout(soup: BeautifulSoup) -> None:
-    """Render Magento Page Builder sliders as static card grids in Builder."""
+    """Render Magento Page Builder sliders as CSS scroll-snap carousels.
+
+    Replaces JS-carousel layout (overflow:hidden + absolute positioning) with
+    a native CSS horizontal scroll-snap so slides are scrollable without JS.
+    """
     for slider in soup.find_all(attrs={"data-content-type": "slider"}):
         pc_count = _safe_int(slider.get("data-pc-carousel-count"), 1)
         gap_px = 16
-        slider["style"] = _merge_inline_style(
-            slider.get("style", ""),
-            f"display: flex; flex-wrap: wrap; align-items: stretch; gap: {gap_px}px; width: 100%"
-        )
+
+        # Force horizontal scroll-snap — override JS-set overflow:hidden
+        style = slider.get("style", "")
+        style = _set_inline_style_property(style, "display", "flex")
+        style = _set_inline_style_property(style, "flex-wrap", "nowrap")
+        style = _set_inline_style_property(style, "overflow-x", "auto")
+        style = _set_inline_style_property(style, "overflow-y", "visible")
+        style = _set_inline_style_property(style, "scroll-snap-type", "x mandatory")
+        style = _set_inline_style_property(style, "gap", f"{gap_px}px")
+        style = _set_inline_style_property(style, "width", "100%")
+        style = _set_inline_style_property(style, "-webkit-overflow-scrolling", "touch")
+        style = _set_inline_style_property(style, "padding-bottom", "8px")
+        style = _set_inline_style_property(style, "align-items", "stretch")
+        slider["style"] = style
 
         slide_items = [child for child in slider.children if getattr(child, "name", None)]
         if not slide_items:
             continue
 
-        slide_width = "100%" if pc_count <= 1 else f"calc((100% - {(pc_count - 1) * gap_px}px) / {pc_count})"
+        if pc_count <= 1:
+            slide_width = "100%"
+        else:
+            slide_width = f"calc((100% - {(pc_count - 1) * gap_px}px) / {pc_count})"
 
         for slide in slide_items:
-            style = slide.get("style", "")
-            style = _set_inline_style_property(style, "box-sizing", "border-box")
-            style = _set_inline_style_property(style, "display", "flex")
-            style = _set_inline_style_property(style, "flex-direction", "column")
-            style = _set_inline_style_property(style, "width", slide_width)
-            style = _set_inline_style_property(style, "max-width", slide_width)
-            style = _set_inline_style_property(style, "flex", f"0 0 {slide_width}")
-            style = _set_inline_style_property(style, "margin", "0")
-            slide["style"] = style
+            s = slide.get("style", "")
+            # Reset any JS carousel positioning (absolute, transforms, opacity:0)
+            s = _set_inline_style_property(s, "position", "static")
+            s = _set_inline_style_property(s, "opacity", "1")
+            s = _set_inline_style_property(s, "visibility", "visible")
+            s = _set_inline_style_property(s, "display", "flex")
+            s = _set_inline_style_property(s, "flex-direction", "column")
+            s = _set_inline_style_property(s, "box-sizing", "border-box")
+            s = _set_inline_style_property(s, "flex", f"0 0 {slide_width}")
+            s = _set_inline_style_property(s, "min-width", "0")
+            s = _set_inline_style_property(s, "max-width", slide_width)
+            s = _set_inline_style_property(s, "scroll-snap-align", "start")
+            s = _set_inline_style_property(s, "margin", "0")
+            slide["style"] = s
 
 
 def _apply_product_listing_layout(soup: BeautifulSoup) -> None:
-    """Convert Magento product listing ol/ul from vertical list to card grid.
+    """Convert Magento product listing to horizontal scroll-snap carousel.
 
-    Magento product widgets render as <ol class="products list items product-items">
-    which displays as a numbered list in plain HTML. We convert it to a CSS grid
-    so it looks like the original horizontal product carousel/grid.
+    Magento product widgets render as <ol class="products list items product-items">.
+    We convert this to a CSS horizontal scroll-snap so items are scrollable
+    exactly like the original JS carousel — no JavaScript required.
     """
     # Target any <ol> or <ul> that has the Magento product-items class
     for container in soup.find_all(["ol", "ul"], class_=lambda c: c and "product-items" in c):
         # Detect carousel column count from a parent data attribute if available
         parent = container.parent
-        carousel_count = 4  # default: match original 4-per-row carousel
+        carousel_count = 4  # default: 4 items visible (matching original carousel)
         if parent:
             for attr in ("data-pc-carousel-count", "data-carousel-count", "data-items-per-page"):
                 val = parent.get(attr) or parent.get(attr.replace("-", "_"), "")
                 if val:
                     carousel_count = _safe_int(val, 4)
                     break
-        container["style"] = _merge_inline_style(
-            container.get("style", ""),
-            f"display: grid; grid-template-columns: repeat({carousel_count}, 1fr); "
-            "gap: 16px; list-style: none; padding: 0; margin: 0 0 24px 0;"
-        )
-        for item in container.find_all("li", class_=lambda c: c and "product-item" in c):
-            item["style"] = _merge_inline_style(
-                item.get("style", ""),
-                "box-sizing: border-box; display: flex; flex-direction: column; "
-                "border: 1px solid #e8e8e8; border-radius: 8px; overflow: hidden; background: #fff;"
-            )
 
-    # Also handle [data-content-type="products"] blocks
+        item_width = f"calc((100% - {(carousel_count - 1) * 16}px) / {carousel_count})"
+
+        # Force horizontal scroll-snap — use _set_inline_style_property to
+        # OVERRIDE any overflow:hidden or positioning set by JS carousel
+        s = container.get("style", "")
+        s = _set_inline_style_property(s, "display", "flex")
+        s = _set_inline_style_property(s, "flex-wrap", "nowrap")
+        s = _set_inline_style_property(s, "overflow-x", "auto")
+        s = _set_inline_style_property(s, "overflow-y", "visible")
+        s = _set_inline_style_property(s, "scroll-snap-type", "x mandatory")
+        s = _set_inline_style_property(s, "gap", "16px")
+        s = _set_inline_style_property(s, "list-style", "none")
+        s = _set_inline_style_property(s, "padding", "0 0 12px 0")
+        s = _set_inline_style_property(s, "margin", "0 0 24px 0")
+        s = _set_inline_style_property(s, "-webkit-overflow-scrolling", "touch")
+        container["style"] = s
+
+        for item in container.find_all("li", class_=lambda c: c and "product-item" in c):
+            is_style = item.get("style", "")
+            is_style = _set_inline_style_property(is_style, "flex", f"0 0 {item_width}")
+            is_style = _set_inline_style_property(is_style, "min-width", "0")
+            is_style = _set_inline_style_property(is_style, "scroll-snap-align", "start")
+            is_style = _set_inline_style_property(is_style, "box-sizing", "border-box")
+            is_style = _set_inline_style_property(is_style, "display", "flex")
+            is_style = _set_inline_style_property(is_style, "flex-direction", "column")
+            is_style = _set_inline_style_property(is_style, "position", "static")
+            is_style = _set_inline_style_property(is_style, "opacity", "1")
+            is_style = _set_inline_style_property(is_style, "visibility", "visible")
+            is_style = _set_inline_style_property(is_style, "border", "1px solid #e8e8e8")
+            is_style = _set_inline_style_property(is_style, "border-radius", "8px")
+            is_style = _set_inline_style_property(is_style, "overflow", "hidden")
+            is_style = _set_inline_style_property(is_style, "background", "#fff")
+            item["style"] = is_style
+
+    # Also handle [data-content-type="products"] wrapper — ensure it doesn't clip the carousel
     for el in soup.find_all(attrs={"data-content-type": "products"}):
-        el["style"] = _merge_inline_style(el.get("style", ""), "width: 100%; overflow: hidden;")
+        s = el.get("style", "")
+        s = _set_inline_style_property(s, "width", "100%")
+        s = _set_inline_style_property(s, "overflow", "visible")
+        el["style"] = s
 
 
 def _apply_toc_layout(soup: BeautifulSoup) -> None:
