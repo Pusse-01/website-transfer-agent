@@ -494,12 +494,23 @@ with tab_full_page:
                 st.error(err)
         else:
             st.session_state.captured_pages[page.url] = page
+            css_msg = (
+                f"inlined **{len(page.stylesheets)}** stylesheet(s)"
+                if page.stylesheets
+                else "styles kept as external links (CSS downloads failed)"
+            )
             st.success(
                 f"Captured **{page.title or page.url}** — "
-                f"inlined {len(page.stylesheets)} stylesheet(s), "
+                f"{css_msg}, "
                 f"kept {len(page.scripts)} script(s), "
                 f"found {len(page.images)} image(s)."
             )
+            if page.css_errors:
+                st.warning(
+                    f"{len(page.css_errors)} stylesheet(s) could not be downloaded and "
+                    "are kept as live `<link>` references. The preview will still "
+                    "render them if the source site is reachable."
+                )
 
     if st.session_state.captured_pages:
         st.divider()
@@ -515,14 +526,27 @@ with tab_full_page:
         col_meta_a, col_meta_b = st.columns(2)
         with col_meta_a:
             st.markdown(f"**Title:** {page.title or 'N/A'}")
-            st.markdown(f"**Stylesheets inlined:** {len(page.stylesheets)}")
+            css_label = (
+                f":green[{len(page.stylesheets)} inlined]"
+                if page.stylesheets
+                else (":orange[0 inlined — kept as external links]" if not page.css_errors else ":red[0 inlined — downloads failed]")
+            )
+            st.markdown(f"**Stylesheets:** {css_label}")
             st.markdown(f"**Scripts preserved:** {len(page.scripts)}")
         with col_meta_b:
             st.markdown(f"**Source URL:** `{page.url}`")
             st.markdown(f"**Images referenced:** {len(page.images)}")
 
+        if page.css_errors:
+            with st.expander(f"CSS download errors ({len(page.css_errors)}) — styles loaded from source instead"):
+                for err in page.css_errors:
+                    st.caption(err)
+
         st.markdown("### Live preview")
-        components.html(page.iframe_html or page.html, height=820, scrolling=True)
+        # page.html is always a complete <!DOCTYPE html> document (snapshot /
+        # content modes) or a plain <iframe src="..."> string (iframe mode).
+        # Pass it directly to components.html() — no nested srcdoc needed.
+        components.html(page.html, height=820, scrolling=True)
 
         col_dl1, col_dl2, col_upload = st.columns(3)
         with col_dl1:

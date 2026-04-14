@@ -144,8 +144,23 @@ class MagentoAdminClient:
         self._post(action, data=payload)
 
     def _confirm_logged_in(self) -> bool:
-        """Hit the admin dashboard; if we get redirected to login we failed."""
-        resp = self._get(urljoin(self.admin_url, "admin/dashboard/"))
+        """Hit the admin dashboard; if we get redirected to login we failed.
+
+        The Magento 2 dashboard is at ``<admin_path>/dashboard/``, e.g.
+        ``/adminControl/dashboard/``.  We previously mistakenly appended
+        ``admin/dashboard/`` which produced a double-prefixed 404 path.
+        """
+        dashboard_url = self.admin_url.rstrip("/") + "/dashboard/"
+        try:
+            resp = self._get(dashboard_url)
+        except Exception:
+            # If the dashboard URL 404s or raises, fall back to checking
+            # the admin root for the presence of a login form.
+            try:
+                resp = self._get(self.admin_url)
+                return "login" not in resp.url and 'name="login[username]"' not in resp.text
+            except Exception:
+                return False
         return "login" not in resp.url and "Invalid" not in resp.text
 
     def _require_login(self) -> None:
