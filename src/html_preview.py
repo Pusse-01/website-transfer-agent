@@ -20,6 +20,11 @@ def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
     """
     title = post_data.get("title", "Untitled")
     html_content = post_data.get("html_content", "")
+    # Live capture already produced Builder.io-ready HTML with the real
+    # stylesheets inlined. Running process_html_for_builder over it would
+    # strip those <style> blocks and collapse the layout again — the exact
+    # bug we're trying to fix. Honour the flag set by the capture pipeline.
+    already_processed = bool(post_data.get("_html_already_processed"))
     thumbnail = post_data.get("thumbnail", "")
     meta_description = post_data.get("meta_description", "")
     tags = post_data.get("tags", [])
@@ -217,7 +222,7 @@ def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
 <body>
     {header_html}
     <div class="blog-content">
-        {process_html_for_builder(html_content)}
+        {html_content if already_processed else process_html_for_builder(html_content)}
     </div>
 </body>
 </html>"""

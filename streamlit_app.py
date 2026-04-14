@@ -35,6 +35,7 @@ from src.excel_reader import read_blog_list, read_static_page_list, detect_excel
 from src.excel_writer import export_blog_results
 from src.migration_agent import MigrationAgent
 from src.state_persistence import save_run, load_run, load_latest_run, list_runs
+from src.live_capture import capture_live_fragment, is_available as live_capture_available
 
 load_dotenv()
 
@@ -120,6 +121,44 @@ with st.sidebar:
         type="password",
         help="Required for uploading to Builder.io",
     )
+
+    st.divider()
+    st.subheader("High-Fidelity Capture")
+    _live_avail = live_capture_available()
+    use_live_capture = st.checkbox(
+        "Use live browser capture (recommended)",
+        value=_live_avail,
+        disabled=not _live_avail,
+        help=(
+            "Renders each page in Chromium and pulls in the real stylesheets the "
+            "browser uses. This is the only way to preserve carousels, sliders, "
+            "hover states, and fonts. If unchecked, the legacy GraphQL/HTML "
+            "scraper is used."
+        ),
+    )
+    if not _live_avail:
+        st.caption("Playwright not installed — run `pip install playwright && playwright install chromium`.")
+
+    with st.expander("Magento admin login (only for non-public pages)", expanded=False):
+        st.caption(
+            "Not required for CMS pages like `/hk/zh/intro-fur-tips` — those are already public. "
+            "Provide credentials only if the target URL is behind admin auth."
+        )
+        magento_admin_url = st.text_input(
+            "Admin URL",
+            value=os.getenv("MAGENTO_ADMIN_URL", "https://www.pricerite.com.hk/adminControl/"),
+        )
+        magento_username = st.text_input("Username", value=os.getenv("MAGENTO_USERNAME", ""))
+        magento_password = st.text_input(
+            "Password",
+            value=os.getenv("MAGENTO_PASSWORD", ""),
+            type="password",
+        )
+        magento_otp = st.text_input(
+            "OTP (authenticator code)",
+            value="",
+            help="Leave blank if not using 2FA. If you have 2FA enabled, enter the current code right before hitting Scrape.",
+        )
 
     st.divider()
     st.subheader("Status")
@@ -395,26 +434,78 @@ with tab_preview:
             if scrape_preview:
                 url_key = selected_page.get("url_key", "")
                 page_type = selected_page.get("page_type", "blog")
+                primary_url = selected_page.get("primary_url", "")
+                if not primary_url:
+                    if page_type == "blog":
+                        primary_url = f"{source_url.rstrip('/')}{blog_path}{url_key}"
+                    else:
+                        primary_url = f"{source_url.rstrip('/')}/{url_key}"
 
-                with st.spinner(f"Scraping {url_key}..."):
-                    try:
-                        if page_type == "blog":
-                            scraper = BlogScraper(source_url, blog_path)
-                            post_data = scraper.fetch_post_by_url_key(url_key)
-                        else:
-                            scraper = StaticPageScraper(source_url)
-                            primary_url = selected_page.get("primary_url", "")
-                            post_data = scraper.fetch_page_by_url(primary_url, url_key)
+                post_data = None
+                captured_live = False
 
-                        if post_data.get("error"):
-                            st.error(f"Scraping failed: {post_data['error']}")
-                        elif not post_data.get("html_content"):
-                            st.warning("No content found for this page.")
-                        else:
-                            st.session_state.scraped_posts[url_key] = post_data
-                            st.success(f"Scraped: {post_data.get('title', url_key)}")
-                    except Exception as e:
-                        st.error(f"Exception: {e}")
+                # Preferred path: live browser capture — pulls real stylesheets
+                # so carousels, sliders, hover states survive intact.
+                if use_live_capture and primary_url:
+                    with st.spinner(f"Rendering {primary_url} in headless Chromium..."):
+                        try:
+                            login = None
+                            if magento_username and magento_password:
+                                login = {
+                                    "admin_url": magento_admin_url,
+                                    "username": magento_username,
+                                    "password": magento_password,
+                                    "otp": magento_otp or "",
+                                }
+                            capture = capture_live_fragment(primary_url, login=login)
+                            if capture.ok:
+                                post_data = {
+                                    "title": capture.title,
+                                    "html_content": capture.html_fragment,
+                                    "thumbnail": capture.og_image,
+                                    "og_image": capture.og_image,
+                                    "meta_title": capture.meta_title,
+                                    "meta_description": capture.meta_description,
+                                    "url_key": url_key,
+                                    "images": capture.images,
+                                    "source": "live_capture",
+                                    "page_type": page_type,
+                                    "_html_already_processed": True,
+                                }
+                                captured_live = True
+                                st.success(
+                                    f"Live capture OK — {capture.css_rule_count} CSS rules from "
+                                    f"{capture.content_selector_used!r}"
+                                )
+                            else:
+                                st.warning(f"Live capture failed ({capture.error}); falling back to legacy scraper.")
+                        except Exception as e:
+                            st.warning(f"Live capture exception: {e} — falling back to legacy scraper.")
+
+                # Fallback: legacy GraphQL / HTML scraper
+                if not post_data:
+                    with st.spinner(f"Scraping {url_key} via GraphQL/HTML..."):
+                        try:
+                            if page_type == "blog":
+                                scraper = BlogScraper(source_url, blog_path)
+                                post_data = scraper.fetch_post_by_url_key(url_key)
+                            else:
+                                scraper = StaticPageScraper(source_url)
+                                post_data = scraper.fetch_page_by_url(primary_url, url_key)
+                        except Exception as e:
+                            st.error(f"Exception: {e}")
+                            post_data = None
+
+                if not post_data:
+                    pass  # error already reported
+                elif post_data.get("error"):
+                    st.error(f"Scraping failed: {post_data['error']}")
+                elif not post_data.get("html_content"):
+                    st.warning("No content found for this page.")
+                else:
+                    st.session_state.scraped_posts[url_key] = post_data
+                    if not captured_live:
+                        st.success(f"Scraped (legacy): {post_data.get('title', url_key)}")
 
         # Show preview of scraped content
         if st.session_state.scraped_posts:
@@ -531,6 +622,16 @@ with tab_pipeline:
             log_container = st.container()
 
             # Initialize agent
+            # Build Magento login dict only if credentials were entered.
+            _login = None
+            if magento_username and magento_password:
+                _login = {
+                    "admin_url": magento_admin_url,
+                    "username": magento_username,
+                    "password": magento_password,
+                    "otp": magento_otp or "",
+                }
+
             agent = MigrationAgent(
                 source_base_url=source_url,
                 builder_api_key=builder_private_key,
@@ -539,6 +640,8 @@ with tab_pipeline:
                 page_model=builder_page_model,
                 blog_path=blog_path,
                 builder_public_key=builder_public_key,
+                use_live_capture=use_live_capture,
+                magento_login=_login,
             )
 
             # Build the migration list

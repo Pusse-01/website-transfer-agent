@@ -28,6 +28,7 @@ from .visual_verifier import VisualVerifier, run_visual_verification
 from .deduplication import deduplicate_content_blocks, deduplicate_similar_images
 from .css_processor import process_html_for_builder
 from .llm_layout_fixer import fix_layout as llm_fix_layout, is_enabled as llm_fix_enabled
+from .live_capture import capture_live_fragment, is_available as live_capture_available
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,8 @@ class MigrationAgent:
         download_dir: str = "downloaded_images",
         run_id: str = None,
         builder_public_key: str = "",
+        use_live_capture: bool = True,
+        magento_login: dict | None = None,
     ):
         self.source_base_url = source_base_url
         self.blog_scraper = BlogScraper(source_base_url, blog_path)
@@ -66,6 +69,13 @@ class MigrationAgent:
         )
         self.blog_path = blog_path
         self.visual_verifier = VisualVerifier()
+        # Live capture: renders URL in Playwright and pulls real stylesheets.
+        # This is the ONLY reliable way to preserve carousels, sliders, and
+        # hover states from the live Magento page.
+        self.use_live_capture = use_live_capture and live_capture_available()
+        # Optional Magento admin credentials. Not needed for public CMS pages
+        # but passed through to the capture layer for non-public URLs.
+        self.magento_login = magento_login
 
         # Logger
         self.mlog = MigrationLogger(run_id=run_id)
@@ -448,7 +458,12 @@ class MigrationAgent:
             # model rewrite the HTML if the layout has drifted. This is a
             # best-effort step — if OPENAI_API_KEY is unset or the call fails,
             # the pipeline falls through and uploads the unmodified HTML.
-            if not dry_run and llm_fix_enabled():
+            # When live capture already pulled the real stylesheets, re-running
+            # process_html_for_builder here would strip the <style> tags we
+            # just collected and wipe out the visual fidelity. Skip the LLM
+            # fixer entirely on live-captured HTML.
+            already_final = bool(page_data.get("_html_already_processed"))
+            if not dry_run and llm_fix_enabled() and not already_final:
                 try:
                     self.mlog.info(url_key, page_type, "transform",
                                    "Running LLM-assisted layout fix against original page...")
@@ -558,7 +573,62 @@ class MigrationAgent:
         return result
 
     def _scrape_page(self, url_key: str, page_type: str, primary_url: str) -> dict:
-        """Scrape a page using the appropriate scraper."""
+        """
+        Fetch a page. When live capture is enabled we render the real URL in
+        Playwright and keep the rendered DOM + the stylesheets the browser
+        actually loaded. This is what makes the migrated page look identical
+        to the source (carousels, sliders, hover states, fonts).
+
+        If live capture fails (Playwright missing, network issue, bad selector),
+        we fall back to the legacy GraphQL / HTML scrapers so the pipeline
+        still produces a result.
+        """
+        # Live capture path — preferred, works for both page types.
+        if self.use_live_capture and primary_url:
+            capture = capture_live_fragment(
+                primary_url,
+                login=self.magento_login,
+            )
+            if capture.ok:
+                self.mlog.info(
+                    url_key, page_type, "scrape",
+                    f"Live capture OK: {capture.css_rule_count} CSS rules, "
+                    f"selector={capture.content_selector_used!r}",
+                )
+                # Merge capture with whatever metadata the legacy scraper
+                # already knew (like graphql tags/categories for blog posts).
+                meta = {}
+                if page_type == "blog":
+                    legacy = self.blog_scraper.fetch_post_by_url_key(url_key) or {}
+                    if legacy and not legacy.get("error"):
+                        meta = legacy
+
+                return {
+                    "title": capture.title or meta.get("title", ""),
+                    "html_content": capture.html_fragment,
+                    "thumbnail": capture.og_image or meta.get("thumbnail", ""),
+                    "og_image": capture.og_image,
+                    "meta_title": capture.meta_title or meta.get("meta_title", ""),
+                    "meta_description": capture.meta_description or meta.get("meta_description", ""),
+                    "meta_keywords": meta.get("meta_keywords", ""),
+                    "categories": meta.get("categories", []),
+                    "tags": meta.get("tags", []),
+                    "url_key": url_key,
+                    "published_at": meta.get("published_at", ""),
+                    "images": capture.images,
+                    "source": "live_capture",
+                    "page_type": page_type,
+                    # Signal downstream that HTML is already final — skip
+                    # css_processor + LLM rewriter, they'd strip the very
+                    # stylesheets we just collected.
+                    "_html_already_processed": True,
+                }
+            else:
+                self.mlog.warning(
+                    url_key, page_type, "scrape",
+                    f"Live capture failed ({capture.error}); falling back to legacy scraper",
+                )
+
         if page_type == "blog":
             return self.blog_scraper.fetch_post_by_url_key(url_key)
         else:

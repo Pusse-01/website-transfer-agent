@@ -8,10 +8,12 @@ Supports two content models:
 
 import json
 import logging
+import re
 import time
 import uuid
 
 import requests
+from bs4 import BeautifulSoup
 
 from .css_processor import process_html_for_builder
 
@@ -48,6 +50,64 @@ class BuilderClient:
         })
         self._request_count = 0
         self._last_request_time = 0.0
+
+    @staticmethod
+    def _derive_entry_name(data: dict) -> str:
+        """
+        Figure out a good Builder.io entry name.
+
+        Builder.io shows this name in the content list. `.get("title", "Untitled")`
+        returns an empty string when the key exists but is blank — which
+        produced the blank rows the user saw in the dashboard. This fallback
+        chain never returns empty.
+        """
+        for key in ("title", "meta_title", "content_heading"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        url_key = data.get("url_key") or data.get("slug")
+        if isinstance(url_key, str) and url_key.strip():
+            # Humanise the slug: "intro-fur-tips" -> "Intro Fur Tips"
+            slug = url_key.strip().strip("/").split("/")[-1]
+            words = re.split(r"[-_]+", slug)
+            return " ".join(w.capitalize() for w in words if w) or url_key
+        return "Untitled"
+
+    @staticmethod
+    def _derive_cover_image(data: dict) -> str:
+        """
+        Pick a cover image. Builder.io's blog-post model typically has a
+        required `coverImage` field; sending an empty string triggers
+        "Cover Image file is required" on publish.
+
+        Tries, in order:
+            1. explicit thumbnail
+            2. og_image from live capture
+            3. first <img> inside the HTML content
+            4. a transparent placeholder (so drafts at least don't block)
+        """
+        for key in ("thumbnail", "og_image", "cover_image"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        html_content = data.get("html_content", "") or ""
+        if html_content:
+            try:
+                soup = BeautifulSoup(html_content, "html.parser")
+                for img in soup.find_all("img"):
+                    src = img.get("src") or img.get("data-src") or ""
+                    if src and src.startswith(("http://", "https://", "//")):
+                        if src.startswith("//"):
+                            src = "https:" + src
+                        return src
+            except Exception:
+                pass
+
+        # Last-resort placeholder — a 1x1 transparent PNG on Builder.io's CDN.
+        # This is enough to pass the "required" check; editors can replace it.
+        return "https://cdn.builder.io/api/v1/image/assets%2Fplaceholder%2Fblank.png"
 
     def _cdn_url(self, model: str, extra_params: str = "") -> str:
         """Build a CDN read URL.
@@ -98,8 +158,11 @@ class BuilderClient:
             skip_processing=pre_processed,
         )
 
+        entry_name = self._derive_entry_name(blog_data)
+        cover_image = self._derive_cover_image(blog_data)
+
         entry = {
-            "name": blog_data.get("title", "Untitled"),
+            "name": entry_name,
             "published": "published" if publish else "draft",
             "query": [
                 {
@@ -110,13 +173,13 @@ class BuilderClient:
                 }
             ],
             "data": {
-                "title": blog_data.get("title", ""),
+                "title": blog_data.get("title", "") or entry_name,
                 "url": url_path,
                 "slug": url_key,
-                "description": blog_data.get("meta_description", "") or blog_data.get("title", ""),
-                "excerpt": blog_data.get("meta_description", "") or blog_data.get("title", ""),
-                "coverImage": blog_data.get("thumbnail", ""),
-                "coverImageAlt": blog_data.get("thumbnail_alt", "") or blog_data.get("title", ""),
+                "description": blog_data.get("meta_description", "") or entry_name,
+                "excerpt": blog_data.get("meta_description", "") or entry_name,
+                "coverImage": cover_image,
+                "coverImageAlt": blog_data.get("thumbnail_alt", "") or entry_name,
                 "publishDate": blog_data.get("published_at", "") or self._current_iso_date(),
                 "authorName": blog_data.get("author", ""),
                 "canonicalUrl": blog_data.get("canonical_url", ""),
@@ -161,8 +224,11 @@ class BuilderClient:
             skip_processing=pre_processed,
         )
 
+        entry_name = self._derive_entry_name(page_data)
+        cover_image = self._derive_cover_image(page_data)
+
         entry = {
-            "name": page_data.get("title", "Untitled"),
+            "name": entry_name,
             "published": "published" if publish else "draft",
             "query": [
                 {
@@ -173,7 +239,7 @@ class BuilderClient:
                 }
             ],
             "data": {
-                "title": page_data.get("title", ""),
+                "title": page_data.get("title", "") or entry_name,
                 "url": url_path,
                 "slug": url_key,
                 "blocks": blocks,
@@ -187,8 +253,9 @@ class BuilderClient:
             entry["data"]["metaDescription"] = page_data["meta_description"]
         if page_data.get("meta_keywords"):
             entry["data"]["metaKeywords"] = page_data["meta_keywords"]
-        if page_data.get("thumbnail"):
-            entry["data"]["coverImage"] = page_data["thumbnail"]
+        # Always set a cover image — Builder.io's page model may mark it
+        # required. Placeholder is used only when nothing else is available.
+        entry["data"]["coverImage"] = cover_image
 
         if existing_entry_id:
             return self.update_entry(existing_entry_id, entry, model_override=self.page_model)
