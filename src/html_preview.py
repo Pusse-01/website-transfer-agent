@@ -106,6 +106,19 @@ def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
     if base_url:
         html_content = _make_images_absolute(html_content, base_url)
 
+    # Stamp referrerpolicy="no-referrer" on every <img> tag in the content so
+    # the browser sends no Referer header when fetching images. Most hotlink-
+    # protection setups (Nginx valid_referers, Cloudflare, etc.) allow requests
+    # with no Referer — they only block requests with a foreign Referer. Without
+    # this the preview iframe sends Referer: http://localhost:8501/... which
+    # pricerite.com.hk's CDN/hotlink-protection treats as an unknown origin and
+    # returns 403, producing broken-image icons for all product photos.
+    html_content = re.sub(
+        r'(<img\b)(?![^>]*referrerpolicy)',
+        r'\1 referrerpolicy="no-referrer"',
+        html_content,
+    )
+
     body_padding = "0" if is_static_page else "24px"
     body_max_width = "1440px" if is_static_page else "900px"
     body_margin = "0 auto"
@@ -126,6 +139,10 @@ def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Suppress Referer header for all sub-resource requests so hotlink-
+         protection on the source domain doesn't block image loads in the
+         Streamlit preview iframe (the default Referer would be localhost). -->
+    <meta name="referrer" content="no-referrer">
     <title>{title}</title>
     <style>
         * {{
