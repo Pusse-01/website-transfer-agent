@@ -23,6 +23,8 @@ from src.html_preview import generate_blog_preview_html
 from src.builder_client import BuilderClient
 from src.image_handler import ImageHandler
 from src.excel_reader import read_blog_list
+from src.page_extractor import MagentoPageExtractor
+from src.magento_admin import MagentoAdminClient, MagentoAdminError
 
 load_dotenv()
 
@@ -49,6 +51,8 @@ if "upload_results" not in st.session_state:
     st.session_state.upload_results = {}
 if "builder_entries" not in st.session_state:
     st.session_state.builder_entries = []
+if "captured_pages" not in st.session_state:
+    st.session_state.captured_pages = {}  # url -> ExtractedPage
 
 # ---------------------------------------------------------------------------
 # Sidebar - Configuration
@@ -173,8 +177,22 @@ def builder_entry_to_preview_data(entry: dict) -> dict:
 # ---------------------------------------------------------------------------
 st.title("Blog Migration Dashboard")
 
-tab_input, tab_preview, tab_builder, tab_upload, tab_results = st.tabs(
-    ["1. Input & Scrape", "2. Preview", "3. Builder.io Content", "4. Upload to Builder.io", "5. Results"]
+(
+    tab_input,
+    tab_preview,
+    tab_full_page,
+    tab_builder,
+    tab_upload,
+    tab_results,
+) = st.tabs(
+    [
+        "1. Input & Scrape",
+        "2. Preview",
+        "3. Full Page Capture",
+        "4. Builder.io Content",
+        "5. Upload to Builder.io",
+        "6. Results",
+    ]
 )
 
 # ========================== TAB 1: INPUT & SCRAPE ==========================
@@ -376,7 +394,184 @@ with tab_preview:
                 st.code(post_data.get("html_content", ""), language="html")
 
 
-# ========================== TAB 3: BUILDER.IO CONTENT ==========================
+# ========================== TAB 3: FULL PAGE CAPTURE ==========================
+with tab_full_page:
+    st.subheader("Full Page Capture (100% identical fidelity)")
+    st.markdown(
+        "Fetches the fully rendered source page and **inlines every linked "
+        "stylesheet** (so carousels, hover states, sliders, and grid layouts "
+        "are preserved). Optionally logs into the Magento admin so unpublished "
+        "pages become reachable."
+    )
+
+    fp_url = st.text_input(
+        "Page URL to capture",
+        placeholder=f"{source_url}/any-page-path",
+        help="Full URL or a path relative to the Source Website URL in the sidebar.",
+    )
+
+    mode_label = st.radio(
+        "Capture mode",
+        [
+            "Snapshot (inline all CSS, keep JS live)",
+            "Content only (main element + inlined CSS)",
+            "Iframe (highest fidelity, embeds the live page)",
+        ],
+        index=0,
+        help=(
+            "Snapshot bundles CSS so the page renders offline. "
+            "Iframe mode literally embeds the live page — carousels and JS "
+            "interactions behave exactly like on pricerite.com."
+        ),
+    )
+    mode = {
+        "Snapshot (inline all CSS, keep JS live)": "snapshot",
+        "Content only (main element + inlined CSS)": "content",
+        "Iframe (highest fidelity, embeds the live page)": "iframe",
+    }[mode_label]
+
+    content_selector = ""
+    if mode == "content":
+        content_selector = st.text_input(
+            "Content selector (optional)",
+            placeholder="main#maincontent",
+            help="CSS selector for the element whose HTML to extract. Leave "
+                 "blank to auto-detect.",
+        )
+
+    with st.expander("Magento admin login (optional, for private pages)"):
+        st.caption(
+            "Only needed if the page isn't publicly accessible. Credentials "
+            "are used for this request only and never stored."
+        )
+        admin_path = st.text_input(
+            "Admin path",
+            value=os.getenv("MAGENTO_ADMIN_PATH", "/adminControl/"),
+            key="fp_admin_path",
+        )
+        admin_user = st.text_input("Username", key="fp_admin_user")
+        admin_pass = st.text_input("Password", type="password", key="fp_admin_pass")
+        admin_totp = st.text_input(
+            "Authenticator code",
+            help="Current 6-digit TOTP from your authenticator app.",
+            key="fp_admin_totp",
+        )
+        use_admin = st.checkbox("Login before capturing", key="fp_use_admin")
+
+    capture_clicked = st.button(
+        "Capture Page", type="primary", disabled=not fp_url, key="fp_capture_btn"
+    )
+
+    if capture_clicked and fp_url:
+        extractor_session = None
+        if use_admin:
+            if not admin_user or not admin_pass:
+                st.error("Enter both a username and password to log into the admin.")
+                st.stop()
+            admin = MagentoAdminClient(source_url, admin_path=admin_path)
+            try:
+                with st.spinner("Logging in to Magento admin..."):
+                    admin.login(admin_user, admin_pass, totp_code=admin_totp or None)
+                extractor_session = admin.session
+                st.success("Admin login succeeded.")
+            except MagentoAdminError as e:
+                st.error(f"Admin login failed: {e}")
+                st.stop()
+            except Exception as e:
+                st.error(f"Admin login raised an unexpected error: {e}")
+                st.stop()
+
+        extractor = MagentoPageExtractor(source_url, session=extractor_session)
+        with st.spinner("Fetching page and inlining stylesheets..."):
+            page = extractor.extract(
+                fp_url,
+                mode=mode,
+                selector=content_selector or None,
+            )
+
+        if page.errors:
+            for err in page.errors:
+                st.error(err)
+        else:
+            st.session_state.captured_pages[page.url] = page
+            st.success(
+                f"Captured **{page.title or page.url}** — "
+                f"inlined {len(page.stylesheets)} stylesheet(s), "
+                f"kept {len(page.scripts)} script(s), "
+                f"found {len(page.images)} image(s)."
+            )
+
+    if st.session_state.captured_pages:
+        st.divider()
+        page_urls = list(st.session_state.captured_pages.keys())
+        selected_url = st.selectbox(
+            "Captured pages",
+            page_urls,
+            index=len(page_urls) - 1,
+            key="fp_select",
+        )
+        page = st.session_state.captured_pages[selected_url]
+
+        col_meta_a, col_meta_b = st.columns(2)
+        with col_meta_a:
+            st.markdown(f"**Title:** {page.title or 'N/A'}")
+            st.markdown(f"**Stylesheets inlined:** {len(page.stylesheets)}")
+            st.markdown(f"**Scripts preserved:** {len(page.scripts)}")
+        with col_meta_b:
+            st.markdown(f"**Source URL:** `{page.url}`")
+            st.markdown(f"**Images referenced:** {len(page.images)}")
+
+        st.markdown("### Live preview")
+        components.html(page.iframe_html or page.html, height=820, scrolling=True)
+
+        col_dl1, col_dl2, col_upload = st.columns(3)
+        with col_dl1:
+            st.download_button(
+                "Download HTML fragment",
+                data=page.html,
+                file_name="captured_page.html",
+                mime="text/html",
+                key="fp_dl_html",
+            )
+        with col_dl2:
+            st.download_button(
+                "Download raw source",
+                data=page.raw_html,
+                file_name="captured_page_raw.html",
+                mime="text/html",
+                key="fp_dl_raw",
+            )
+        with col_upload:
+            if builder_private_key and builder_private_key != "your_builder_private_api_key_here":
+                if st.button("Upload to Builder.io", key="fp_upload"):
+                    try:
+                        builder = BuilderClient(builder_private_key, builder_model)
+                        post = {
+                            "title": page.title or page.url,
+                            "html_content": page.html,
+                            "meta_description": page.meta_description,
+                            "url_key": (page.url.rstrip("/").split("/")[-1] or "captured") + "-captured",
+                            "thumbnail": "",
+                            "tags": [],
+                        }
+                        result = builder.create_blog_entry(post, publish=False)
+                        if result.get("success"):
+                            st.success(
+                                "Uploaded to Builder.io as a draft. Open "
+                                "Builder.io to review before publishing."
+                            )
+                        else:
+                            st.error(f"Upload failed: {result.get('error')}")
+                    except Exception as e:
+                        st.error(f"Upload error: {e}")
+            else:
+                st.caption("Add a Builder.io **Private API Key** in the sidebar to enable upload.")
+
+        with st.expander("View captured HTML"):
+            st.code(page.html[:20000], language="html")
+
+
+# ========================== TAB 4: BUILDER.IO CONTENT ==========================
 with tab_builder:
     st.subheader("Builder.io Content Browser")
 
@@ -482,7 +677,7 @@ with tab_builder:
             )
 
 
-# ========================== TAB 4: UPLOAD ==========================
+# ========================== TAB 5: UPLOAD ==========================
 with tab_upload:
     st.subheader("Upload to Builder.io")
 
@@ -552,7 +747,7 @@ with tab_upload:
                 status.markdown("**Upload complete!**")
 
 
-# ========================== TAB 5: RESULTS ==========================
+# ========================== TAB 6: RESULTS ==========================
 with tab_results:
     st.subheader("Migration Results")
 

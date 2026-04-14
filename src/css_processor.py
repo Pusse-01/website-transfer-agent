@@ -95,8 +95,17 @@ def process_html_for_builder(html_content: str) -> str:
     - Rewrites #html-body [data-pb-style=X] selectors to just [data-pb-style=X]
     - Adds base Page Builder layout CSS
     - Wraps everything in a styled container
+
+    If the HTML already carries a full-page snapshot produced by
+    :mod:`src.page_extractor` (detected via the ``magento-embed`` /
+    ``magento-embed-snapshot`` wrapper classes), we leave it untouched: those
+    fragments already bundle the source site's compiled CSS and would only be
+    harmed by extra scoping rules.
     """
     if not html_content:
+        return html_content
+
+    if 'magento-embed-snapshot' in html_content or 'class="magento-embed"' in html_content:
         return html_content
 
     soup = BeautifulSoup(html_content, "html.parser")
