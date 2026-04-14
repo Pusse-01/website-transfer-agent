@@ -259,24 +259,24 @@ def is_available() -> bool:
 # Designed to be resilient: if a sheet is truly cross-origin and blocked, we
 # skip it and keep going instead of throwing.
 _CAPTURE_SCRIPT = r"""
-(({selectors_json}) => {{
+(() => {
   const SELECTORS = {selectors_json};
 
   // -------- Find content root --------
   let root = null;
   let rootSelector = "";
-  for (const sel of SELECTORS) {{
+  for (const sel of SELECTORS) {
     const el = document.querySelector(sel);
-    if (el && el.innerText && el.innerText.trim().length > 40) {{
+    if (el && el.innerText && el.innerText.trim().length > 40) {
       root = el;
       rootSelector = sel;
       break;
-    }}
-  }}
-  if (!root) {{
+    }
+  }
+  if (!root) {
     root = document.querySelector("main") || document.body;
     rootSelector = root.tagName.toLowerCase();
-  }}
+  }
 
   // Clone so mutations don't affect the live page before other evaluations.
   const clone = root.cloneNode(true);
@@ -296,9 +296,9 @@ _CAPTURE_SCRIPT = r"""
     ".page-title-wrapper",
     ".sidebar",".sidebar-main",".sidebar-additional",
   ];
-  for (const sel of STRIP) {{
+  for (const sel of STRIP) {
     clone.querySelectorAll(sel).forEach(n => n.remove());
-  }}
+  }
   // Remove HTML comments
   const walker = document.createTreeWalker(clone, NodeFilter.SHOW_COMMENT);
   const comments = [];
@@ -311,129 +311,129 @@ _CAPTURE_SCRIPT = r"""
   // Rewrite a selector to be nested under SCOPE, but leave :root / html / body
   // rules intact (so CSS custom properties and base resets still apply to the
   // content). Split on top-level commas.
-  function scopeSelector(sel) {{
+  function scopeSelector(sel) {
     const parts = [];
     let depth = 0, buf = "";
-    for (let i = 0; i < sel.length; i++) {{
+    for (let i = 0; i < sel.length; i++) {
       const c = sel[i];
       if (c === "(" || c === "[") depth++;
       else if (c === ")" || c === "]") depth--;
-      else if (c === "," && depth === 0) {{
+      else if (c === "," && depth === 0) {
         parts.push(buf.trim());
         buf = "";
         continue;
-      }}
+      }
       buf += c;
-    }}
+    }
     if (buf.trim()) parts.push(buf.trim());
 
-    return parts.map(p => {{
+    return parts.map(p => {
       const trimmed = p.trim();
       if (!trimmed) return "";
       // Keep :root / html / body rules at the top level so CSS variables and
       // base typography inherit into our scope. Rewrite them to target the
       // scope itself (so they're more specific than Builder.io defaults).
-      if (/^(:root|html|body)(\s|$|\.|:)/i.test(trimmed)) {{
+      if (/^(:root|html|body)(\s|$|\.|:)/i.test(trimmed)) {
         return SCOPE;
-      }}
+      }
       // Pseudo-element prefixes like ::before on the scope itself are fine.
       return SCOPE + " " + trimmed;
-    }}).filter(Boolean).join(", ");
-  }}
+    }).filter(Boolean).join(", ");
+  }
 
   // Does any selector match an element inside our content root?
-  function matchesInside(selectorText) {{
+  function matchesInside(selectorText) {
     // Skip selectors we know can't match content elements.
     if (!selectorText) return false;
     // Test each comma-separated part independently so one bad part doesn't
     // invalidate the whole rule.
     const parts = selectorText.split(",").map(s => s.trim()).filter(Boolean);
-    for (const part of parts) {{
+    for (const part of parts) {
       // Strip pseudo-elements that break querySelectorAll.
       const stripped = part.replace(/::?(?:before|after|first-line|first-letter|placeholder|marker|selection|hover|focus|focus-visible|focus-within|active|visited|checked|disabled|enabled|required|optional|valid|invalid|root)(?:\([^)]*\))?/gi, "");
       if (!stripped.trim()) continue;
-      try {{
+      try {
         // root itself matches? or any descendant?
         if (root.matches && root.matches(stripped)) return true;
         if (root.querySelector(stripped)) return true;
-      }} catch (e) {{
+      } catch (e) {
         // Invalid selector — ignore
-      }}
-    }}
+      }
+    }
     return false;
-  }}
+  }
 
   const collectedCss = [];
   let ruleCount = 0;
 
-  function processRule(rule) {{
+  function processRule(rule) {
     // CSSStyleRule
-    if (rule.type === 1) {{
-      if (matchesInside(rule.selectorText)) {{
+    if (rule.type === 1) {
+      if (matchesInside(rule.selectorText)) {
         const scoped = scopeSelector(rule.selectorText);
-        if (scoped) {{
+        if (scoped) {
           // rule.cssText is "selector { body }"; swap the selector.
           const bodyMatch = rule.cssText.match(/\{([\s\S]*)\}\s*$/);
           const body = bodyMatch ? bodyMatch[1] : "";
           collectedCss.push(scoped + " {" + body + "}");
           ruleCount++;
-        }}
-      }}
+        }
+      }
       return;
-    }}
+    }
     // CSSMediaRule / CSSSupportsRule
-    if (rule.type === 4 || rule.type === 12) {{
+    if (rule.type === 4 || rule.type === 12) {
       const inner = [];
-      for (const sub of rule.cssRules || []) {{
-        if (sub.type === 1) {{
-          if (matchesInside(sub.selectorText)) {{
+      for (const sub of rule.cssRules || []) {
+        if (sub.type === 1) {
+          if (matchesInside(sub.selectorText)) {
             const scoped = scopeSelector(sub.selectorText);
-            if (scoped) {{
+            if (scoped) {
               const bodyMatch = sub.cssText.match(/\{([\s\S]*)\}\s*$/);
               const body = bodyMatch ? bodyMatch[1] : "";
               inner.push(scoped + " {" + body + "}");
               ruleCount++;
-            }}
-          }}
-        }} else {{
+            }
+          }
+        } else {
           // nested @keyframes etc — keep verbatim
           inner.push(sub.cssText);
-        }}
-      }}
-      if (inner.length > 0) {{
+        }
+      }
+      if (inner.length > 0) {
         const cond = rule.conditionText || (rule.media && rule.media.mediaText) || "";
         const at = rule.type === 4 ? "@media" : "@supports";
         collectedCss.push(at + " " + cond + " {\n" + inner.join("\n") + "\n}");
-      }}
+      }
       return;
-    }}
+    }
     // @font-face (5), @keyframes (7), @import (3), @page (6)
-    if (rule.type === 5 || rule.type === 7 || rule.type === 6) {{
+    if (rule.type === 5 || rule.type === 7 || rule.type === 6) {
       collectedCss.push(rule.cssText);
       return;
-    }}
+    }
     // @import — we can't inline the target synchronously; the browser has
     // already loaded it as a separate sheet, so it'll appear in styleSheets.
     // Skip here to avoid duplication.
-  }}
+  }
 
-  for (const sheet of document.styleSheets) {{
+  for (const sheet of document.styleSheets) {
     let rules;
-    try {{
+    try {
       rules = sheet.cssRules || sheet.rules;
-    }} catch (e) {{
+    } catch (e) {
       // Cross-origin blocked — skip.
       continue;
-    }}
+    }
     if (!rules) continue;
-    for (const rule of rules) {{
-      try {{
+    for (const rule of rules) {
+      try {
         processRule(rule);
-      }} catch (e) {{
+      } catch (e) {
         // Malformed rule — skip, keep going.
-      }}
-    }}
-  }}
+      }
+    }
+  }
 
   // -------- Image collection --------
   // Slick carousel (and other lazy loaders) set src to a tiny blank data: URI
@@ -441,7 +441,7 @@ _CAPTURE_SCRIPT = r"""
   // data-original. We must prefer the real URL so the migration agent can
   // upload the correct image to Builder.io.
   const images = [];
-  clone.querySelectorAll("img").forEach(img => {{
+  clone.querySelectorAll("img").forEach(img => {
     const rawSrc  = img.getAttribute("src") || "";
     const lazySrc = img.getAttribute("data-src")
                  || img.getAttribute("data-lazy")
@@ -459,14 +459,14 @@ _CAPTURE_SCRIPT = r"""
     img.removeAttribute("data-lazy");
     img.removeAttribute("data-original");
     if (img.getAttribute("loading") === "lazy") img.setAttribute("loading", "eager");
-  }});
+  });
 
   // -------- Meta --------
   const ogImageEl = document.querySelector('meta[property="og:image"]');
   const descEl = document.querySelector('meta[name="description"]');
   const metaTitleEl = document.querySelector('title');
 
-  return {{
+  return {
     rootSelector: rootSelector,
     html: clone.outerHTML,
     css: collectedCss.join("\n\n"),
@@ -476,12 +476,22 @@ _CAPTURE_SCRIPT = r"""
     metaDescription: descEl ? descEl.getAttribute("content") || "" : "",
     ogImage: ogImageEl ? ogImageEl.getAttribute("content") || "" : "",
     images: images,
-  }};
-}})({selectors_json})
+  };
+})()
 """
 
 
 def _build_script(selectors: tuple[str, ...]) -> str:
+    """Render the in-browser capture script.
+
+    The source script uses single JS braces throughout (not doubled for
+    Python `.format()`), and `{selectors_json}` is substituted via a plain
+    `.replace()`. An earlier version had doubled braces `{{` / `}}` which
+    — because `.replace()` doesn't un-escape them — produced invalid JS
+    (the browser raised `SyntaxError: Invalid destructuring assignment
+    target` and Playwright silently fell back to the legacy scraper,
+    gutting the whole fidelity pipeline).
+    """
     import json
     return _CAPTURE_SCRIPT.replace("{selectors_json}", json.dumps(list(selectors)))
 

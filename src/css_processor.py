@@ -245,28 +245,34 @@ def sanitize_html(html_content: str) -> str:
 
 def _inline_css(html_with_styles: str) -> str:
     """
-    Convert <style> blocks to inline style= attributes using premailer.
+    Convert <style> blocks to inline style= attributes using premailer,
+    while PRESERVING rules that can't be inlined.
 
-    Builder.io's Custom Code block renders <style> tags as raw text in the
-    editor. By inlining all CSS, we avoid this problem entirely.
+    Builder.io's Custom Code block renders valid <style> tags correctly at
+    runtime (only the visual editor preview shows raw text). Premailer can
+    inline simple class/tag rules, but it cannot inline:
+        - @media queries (responsive breakpoints)
+        - :hover / :focus / :active pseudo-class rules
+        - @keyframes / @font-face
+        - attribute selectors ([data-content-type=...])
+    Those survive inside the `<style>` block after premailer runs. We keep
+    them — they are exactly the rules that give us high-fidelity hover
+    states and responsive layout.
     """
     try:
         pm = Premailer(
             html_with_styles,
             remove_classes=False,
             strip_important=False,
-            keep_style_tags=False,      # Remove <style> after inlining
+            keep_style_tags=True,       # Keep non-inlinable rules in <style>
             include_star_selectors=True,
             cssutils_logging_level=logging.CRITICAL,  # Suppress CSS parse warnings
         )
         return pm.transform()
     except Exception:
-        # If premailer fails (malformed CSS), strip <style> tags manually
-        # and return just the HTML content — better than showing raw CSS
-        soup = BeautifulSoup(html_with_styles, "html.parser")
-        for style_tag in soup.find_all("style"):
-            style_tag.decompose()
-        return str(soup)
+        # If premailer fails (malformed CSS), return the original HTML so the
+        # <style> blocks still render — better than losing all styling.
+        return html_with_styles
 
 
 def _parse_pb_style_rules(soup: BeautifulSoup) -> dict[str, str]:
@@ -335,22 +341,28 @@ def _merge_inline_style(existing: str, new_declarations: str) -> str:
     return existing + ";"
 
 
-_POSITION_BREAKS = re.compile(r'position\s*:\s*(?:sticky|fixed|absolute)', re.IGNORECASE)
+# Only strip positioning that actually escapes Builder.io's Custom Code
+# container. `position: absolute` is essential for product badges ("New",
+# "Sale"), image overlays, and caption placement — stripping it makes badges
+# jump off the images and wreck the layout. Keep absolute, strip sticky/fixed.
+_POSITION_BREAKS = re.compile(r'position\s*:\s*(?:sticky|fixed)', re.IGNORECASE)
 
 
 def _strip_dangerous_positioning(soup: BeautifulSoup) -> None:
-    """Remove position: sticky/fixed/absolute from inline styles and <style> blocks.
+    """Remove position: sticky/fixed from inline styles and <style> blocks.
 
     Magento Page Builder sometimes emits sticky TOCs or fixed banners. Inside
     Builder.io's Custom Code container these escape the content flow and
-    float above unrelated sections, making the layout look as if two different
-    parts of the page are rendered side-by-side.
+    float above unrelated sections.
+
+    We deliberately *keep* `position: absolute` so product badges, image
+    overlays, and captions stay anchored to their parent.
     """
     for el in soup.find_all(style=True):
         style = el.get("style", "") or ""
         if _POSITION_BREAKS.search(style):
             new_style = re.sub(
-                r'position\s*:\s*(sticky|fixed|absolute)\s*;?', "",
+                r'position\s*:\s*(sticky|fixed)\s*;?', "",
                 style, flags=re.IGNORECASE,
             ).strip()
             if new_style:
@@ -362,7 +374,7 @@ def _strip_dangerous_positioning(soup: BeautifulSoup) -> None:
         css_text = style_tag.string or ""
         if _POSITION_BREAKS.search(css_text):
             style_tag.string = re.sub(
-                r'position\s*:\s*(sticky|fixed|absolute)\s*;?', "",
+                r'position\s*:\s*(sticky|fixed)\s*;?', "",
                 css_text, flags=re.IGNORECASE,
             )
 
@@ -599,7 +611,13 @@ def _apply_pagebuilder_layout_styles(soup: BeautifulSoup) -> None:
         el["style"] = _merge_inline_style(el.get("style", ""), "margin-bottom: 0; word-wrap: break-word")
 
     _apply_background_image_styles(soup)
-    _apply_slider_fallback_layout(soup)
+    # NOTE: _apply_slider_fallback_layout used to convert Magento sliders
+    # into static flex grids here. That killed real carousels — arrows still
+    # rendered but did nothing, and the content flattened into a row of
+    # static cards. For a 1:1 migration we want the slider markup preserved
+    # so the carousel reinit script in live_capture.py can wire it up.
+    # If you ever need the static-grid fallback back, call
+    # `_apply_slider_fallback_layout(soup)` here explicitly.
     _strip_dangerous_positioning(soup)
 
 
@@ -667,7 +685,12 @@ def process_html_for_builder(html_content: str) -> str:
 </style>"""
 
     body_html = str(soup)
-    full_html = f"""<div class="migrated-blog-content">
+    # Apply BOTH wrapper classes. The live-capture path scopes its extracted
+    # CSS to `.migrated-live-content`; the legacy/fallback path here scopes
+    # its own base styles to `.migrated-blog-content`. Using both classes on
+    # the same wrapper means either stylesheet's rules match, and we never
+    # lose layout just because the two pipelines disagreed on a class name.
+    full_html = f"""<div class="migrated-blog-content migrated-live-content">
 {base_styles}
 {body_html}
 </div>"""
@@ -678,13 +701,22 @@ def process_html_for_builder(html_content: str) -> str:
     # Clean up premailer artifacts
     inlined_soup = BeautifulSoup(inlined, "html.parser")
 
-    # Final safety: remove any <style> or <script> tags that survived
-    for tag_name in ("style", "script", "noscript"):
+    # Remove <script>/<noscript> — they don't render safely inside Builder.io
+    # Custom Code blocks (and we inject our own carousel script in
+    # live_capture.py when needed).
+    # We deliberately KEEP surviving <style> tags: premailer can't inline
+    # @media queries, :hover / :focus rules, @keyframes, @font-face, or
+    # attribute selectors — those remain in <style> blocks and are exactly
+    # the high-fidelity rules we need for hover states and responsive layout.
+    for tag_name in ("script", "noscript"):
         for tag in inlined_soup.find_all(tag_name):
             tag.decompose()
 
-    # Find our migrated-blog-content div
-    content_div = inlined_soup.find("div", class_="migrated-blog-content")
+    # Find our wrapper div (matches either class name, since we attach both)
+    content_div = (
+        inlined_soup.find("div", class_="migrated-blog-content")
+        or inlined_soup.find("div", class_="migrated-live-content")
+    )
     if content_div:
         return str(content_div)
 
