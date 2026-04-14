@@ -181,6 +181,21 @@ class ImageHandler:
             if not src:
                 continue
 
+            # Slick carousel and other lazy loaders set src to a tiny blank data:
+            # URI placeholder (e.g. data:image/gif;base64,...) with the real URL
+            # in data-src / data-lazy / data-original. Prefer the real URL.
+            if src.startswith("data:"):
+                lazy_src = (
+                    img.get("data-src")
+                    or img.get("data-lazy")
+                    or img.get("data-original")
+                    or ""
+                )
+                if lazy_src:
+                    src = lazy_src
+                else:
+                    continue  # blank placeholder with no real fallback — skip
+
             resolved_src = src if src.startswith("http") else urljoin(base_url, src)
 
             # Remove duplicate <img> elements that share the same source image.

@@ -37,6 +37,161 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Carousel reinitialisation script — injected into every captured fragment.
+#
+# Magento pages use Slick carousel. Playwright captures the fully-rendered
+# HTML (arrows, slides, track) but strips all <script> tags, so Slick's
+# event listeners are gone. This script recreates the core behaviour:
+#
+#   • Removes Slick's cloned slides (used for infinite scroll — not needed
+#     in a static Builder.io page and cause duplicate content).
+#   • Switches the track from pixel-based translate (captured at 1280 px
+#     viewport) to percentage-based translateX so it works at any width.
+#   • Re-attaches click handlers to .slick-prev / .slick-next arrows.
+#   • Works for every .slick-slider on the page (product carousels, related-
+#     products rows, featured-products sections, etc.).
+# ---------------------------------------------------------------------------
+_CAROUSEL_REINIT_JS = """\
+(function () {
+  'use strict';
+
+  function initCarousel(slider) {
+    var list  = slider.querySelector('.slick-list');
+    var track = list && list.querySelector('.slick-track');
+    if (!list || !track) return;
+
+    /* ---- collect real slides, discard Slick-generated clones ----------- */
+    var allSlides  = Array.from(track.querySelectorAll('.slick-slide'));
+    var realSlides = allSlides.filter(function (s) {
+      return !s.classList.contains('slick-cloned');
+    });
+    if (realSlides.length === 0) return;
+
+    /* ---- how many slides are shown at once? ---------------------------- */
+    /* Count the active (visible) real slides Slick marked on page-load.   */
+    var activeSlides = realSlides.filter(function (s) {
+      return s.classList.contains('slick-active');
+    });
+    var slidesToShow = Math.max(1, activeSlides.length);
+
+    /* ---- remove clones ------------------------------------------------- */
+    allSlides.forEach(function (s) {
+      if (s.classList.contains('slick-cloned')) {
+        s.parentNode && s.parentNode.removeChild(s);
+      }
+    });
+
+    /* ---- reset every slide to percentage width ------------------------- */
+    var pct = (100 / slidesToShow) + '%';
+    realSlides.forEach(function (slide) {
+      slide.style.width      = pct;
+      slide.style.flexShrink = '0';
+      slide.style.display    = 'block';
+      slide.removeAttribute('aria-hidden');
+    });
+
+    /* ---- reset track: flex + percentage translate ---------------------- */
+    track.style.cssText = [
+      'display: flex',
+      'flex-wrap: nowrap',
+      'transition: transform 0.35s ease',
+      'will-change: transform',
+      'width: 100%'
+    ].join('; ') + ';';
+
+    list.style.overflow = 'hidden';
+    list.style.position = 'relative';
+    list.style.width    = '100%';
+
+    /* ---- state --------------------------------------------------------- */
+    var currentIndex = 0;
+    var maxIndex     = Math.max(0, realSlides.length - slidesToShow);
+
+    function goTo(n) {
+      currentIndex = Math.max(0, Math.min(maxIndex, n));
+      track.style.transform =
+        'translateX(-' + (currentIndex * (100 / slidesToShow)) + '%)';
+    }
+
+    /* ---- wire arrow buttons ------------------------------------------- */
+    function bindArrow(selector, delta) {
+      var btn = slider.querySelector(selector);
+      if (!btn) return;
+      /* Replace node to drop any stale handlers left by Slick */
+      var fresh = btn.cloneNode(true);
+      btn.parentNode && btn.parentNode.replaceChild(fresh, btn);
+      fresh.style.cursor        = 'pointer';
+      fresh.style.pointerEvents = 'auto';
+      fresh.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        goTo(currentIndex + delta);
+      });
+    }
+
+    bindArrow('.slick-prev', -1);
+    bindArrow('.slick-next', +1);
+
+    goTo(0);
+  }
+
+  function run() {
+    document.querySelectorAll('.slick-slider').forEach(function (slider) {
+      try { initCarousel(slider); } catch (err) { /* silent */ }
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', run);
+  } else {
+    /* DOMContentLoaded already fired (common inside Builder.io) */
+    setTimeout(run, 0);
+  }
+})();
+"""
+
+
+# Extra CSS added to every live-captured fragment to fix carousel layout
+# and prevent image cropping that happens when Slick's pixel-based widths
+# are no longer valid at Builder.io's viewport.
+_CAROUSEL_CSS_FIXES = """\
+/* ---- Carousel layout fixes (injected by migration agent) --------------- */
+.migrated-live-content .slick-list {
+  overflow: hidden !important;
+  position: relative;
+  width: 100%;
+}
+.migrated-live-content .slick-track {
+  display: flex !important;
+  flex-wrap: nowrap;
+}
+.migrated-live-content .slick-slide {
+  flex-shrink: 0;
+  height: auto !important;
+  /* Remove fixed pixel widths captured at source viewport width */
+  min-width: 0;
+}
+.migrated-live-content .slick-slide > div {
+  height: 100%;
+}
+/* Prevent images inside carousel slides from being cropped */
+.migrated-live-content .slick-slide img {
+  width: 100%;
+  height: auto !important;
+  max-width: 100%;
+  display: block;
+  object-fit: contain;
+}
+/* Arrow buttons must be visible and clickable */
+.migrated-live-content .slick-arrow {
+  cursor: pointer;
+  z-index: 10;
+  pointer-events: auto !important;
+}
+"""
+
+
 # Content-area selectors, tried in order. The first one that exists and has
 # non-trivial text content wins. These match Magento CMS / Amasty Blog layouts.
 DEFAULT_CONTENT_SELECTORS: tuple[str, ...] = (
@@ -281,12 +436,29 @@ _CAPTURE_SCRIPT = r"""
   }}
 
   // -------- Image collection --------
+  // Slick carousel (and other lazy loaders) set src to a tiny blank data: URI
+  // placeholder while the real URL is stored in data-src / data-lazy /
+  // data-original. We must prefer the real URL so the migration agent can
+  // upload the correct image to Builder.io.
   const images = [];
   clone.querySelectorAll("img").forEach(img => {{
-    const src = img.currentSrc || img.src || img.getAttribute("data-src") || "";
+    const rawSrc  = img.getAttribute("src") || "";
+    const lazySrc = img.getAttribute("data-src")
+                 || img.getAttribute("data-lazy")
+                 || img.getAttribute("data-original")
+                 || "";
+    // Prefer lazySrc when src is a data: URI placeholder
+    const src = (rawSrc.startsWith("data:") && lazySrc)
+      ? lazySrc
+      : (img.currentSrc || rawSrc || lazySrc);
     if (src && !images.includes(src)) images.push(src);
     // Normalise src to absolute so Python side doesn't have to.
     if (src && img.getAttribute("src") !== src) img.setAttribute("src", src);
+    // Remove lazy-load attributes so Builder.io renders the image immediately
+    img.removeAttribute("data-src");
+    img.removeAttribute("data-lazy");
+    img.removeAttribute("data-original");
+    if (img.getAttribute("loading") === "lazy") img.setAttribute("loading", "eager");
   }});
 
   // -------- Meta --------
@@ -388,6 +560,31 @@ async def _capture_async(
             except Exception:
                 pass
 
+            # Force-load lazy images before capturing.
+            # Slick carousel shows only the active slides; the remaining
+            # slides have src="data:..." placeholders with the real URL in
+            # data-src. We set src from data-src so that:
+            #   (a) img.currentSrc is populated when the capture script runs,
+            #   (b) the image_handler can upload all images, not just active ones.
+            try:
+                await page.evaluate(
+                    "() => {"
+                    "  document.querySelectorAll('img').forEach(function(img) {"
+                    "    var lazy = img.getAttribute('data-src')"
+                    "           || img.getAttribute('data-lazy')"
+                    "           || img.getAttribute('data-original');"
+                    "    var s = img.getAttribute('src') || '';"
+                    "    if (lazy && (s.startsWith('data:') || !s)) {"
+                    "      img.src = lazy;"
+                    "    }"
+                    "  });"
+                    "}"
+                )
+                # Give the browser a moment to start loading the newly-set srcs.
+                await page.wait_for_timeout(800)
+            except Exception:
+                pass
+
             script = _build_script(selectors)
             payload = await page.evaluate(script)
 
@@ -413,9 +610,15 @@ async def _capture_async(
             )
 
             # Final assembly: one self-contained fragment.
+            # Append carousel CSS fixes to the captured stylesheet so they
+            # override any conflicting Slick rules already in `css`.
+            # The carousel reinit script re-wires arrow buttons and converts
+            # Slick's pixel-based layout to percentage-based so it works at
+            # any viewport width inside Builder.io.
             result.html_fragment = (
                 '<div class="migrated-live-content">\n'
-                f"<style>\n{css}\n</style>\n"
+                f"<style>\n{css}\n{_CAROUSEL_CSS_FIXES}\n</style>\n"
+                f"<script>\n{_CAROUSEL_REINIT_JS}\n</script>\n"
                 f"{html}\n"
                 "</div>"
             )
