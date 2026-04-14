@@ -27,7 +27,14 @@ class ImageHandler:
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (compatible; BlogMigrationAgent/1.0)",
+            # Use a realistic browser UA so hotlink-protection checks pass.
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/121.0.0.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
         })
         # Cache mapping: source_url -> builder_url
         self._upload_cache: dict[str, str] = {}
@@ -51,7 +58,14 @@ class ImageHandler:
                 logger.debug(f"Image already downloaded: {filename}")
                 return local_path
 
-            response = self.session.get(image_url, timeout=30, stream=True)
+            # Send the image origin as Referer so basic hotlink-protection
+            # on the source site doesn't block the download.
+            parsed_ref = urlparse(image_url)
+            referer = f"{parsed_ref.scheme}://{parsed_ref.netloc}/"
+            response = self.session.get(
+                image_url, timeout=30, stream=True,
+                headers={"Referer": referer},
+            )
             response.raise_for_status()
 
             with open(local_path, "wb") as f:
@@ -266,6 +280,32 @@ class ImageHandler:
                             return f'url("{new_url}")'
                     return match.group(0)
                 tag["style"] = bg_pattern.sub(replace_bg_url, style)
+
+        # --- Pass 5: Replace background-image URLs inside <style> blocks -------
+        # The live-capture path embeds a large <style> block whose rules may
+        # include background-image: url("https://pricerite.com.hk/...") for
+        # hero banners, row backgrounds, and sliders. Those URLs aren't touched
+        # by the inline-style pass (Pass 4) above, so they'd remain pointing to
+        # the original domain where hotlink protection can block them at render
+        # time inside Builder.io.
+        for style_tag in soup.find_all("style"):
+            css_text = style_tag.string or ""
+            if not css_text or "url(" not in css_text:
+                continue
+
+            def replace_style_bg_url(match):
+                old_url = match.group(1)
+                if not self._is_image_url(old_url):
+                    return match.group(0)
+                if old_url in url_mapping:
+                    return f'url("{url_mapping[old_url]}")'
+                new_url = self._resolve_and_upload_image(old_url, base_url)
+                if new_url:
+                    url_mapping[old_url] = new_url
+                    return f'url("{new_url}")'
+                return match.group(0)
+
+            style_tag.string = bg_pattern.sub(replace_style_bg_url, css_text)
 
         return str(soup), image_mappings
 

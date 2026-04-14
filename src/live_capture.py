@@ -68,12 +68,42 @@ _CAROUSEL_REINIT_JS = """\
     });
     if (realSlides.length === 0) return;
 
-    /* ---- how many slides are shown at once? ---------------------------- */
-    /* Count the active (visible) real slides Slick marked on page-load.   */
-    var activeSlides = realSlides.filter(function (s) {
-      return s.classList.contains('slick-active');
-    });
-    var slidesToShow = Math.max(1, activeSlides.length);
+    /* ---- how many slides are shown at once? --------------------------------
+       Priority order:
+         1. data-slick JSON  (Magento Page Builder sets this, e.g. slidesToShow:4)
+         2. data-pc-carousel-count  (another Magento Page Builder attribute)
+         3. Count of .slick-active real slides (Slick marks all visible ones)
+    -------------------------------------------------------------------------- */
+    var slidesToShow = 1;
+
+    /* 1. data-slick JSON attribute */
+    var slickAttrStr = slider.getAttribute('data-slick') || '';
+    if (slickAttrStr) {
+      try {
+        var slickCfg = JSON.parse(slickAttrStr);
+        if (slickCfg && typeof slickCfg.slidesToShow === 'number' && slickCfg.slidesToShow > 0) {
+          slidesToShow = slickCfg.slidesToShow;
+        }
+      } catch (jsonErr) { /* malformed JSON — ignore */ }
+    }
+
+    /* 2. data-pc-carousel-count */
+    if (slidesToShow <= 1) {
+      var pcCount = parseInt(slider.getAttribute('data-pc-carousel-count') || '0', 10);
+      if (!isNaN(pcCount) && pcCount > 1) {
+        slidesToShow = pcCount;
+      }
+    }
+
+    /* 3. Count .slick-active real slides as last resort */
+    if (slidesToShow <= 1) {
+      var activeSlides = realSlides.filter(function (s) {
+        return s.classList.contains('slick-active');
+      });
+      if (activeSlides.length > 1) {
+        slidesToShow = activeSlides.length;
+      }
+    }
 
     /* ---- remove clones ------------------------------------------------- */
     allSlides.forEach(function (s) {
@@ -156,7 +186,16 @@ _CAROUSEL_REINIT_JS = """\
 # and prevent image cropping that happens when Slick's pixel-based widths
 # are no longer valid at Builder.io's viewport.
 _CAROUSEL_CSS_FIXES = """\
-/* ---- Carousel layout fixes (injected by migration agent) --------------- */
+/* ---- Layout and carousel fixes (injected by migration agent) ----------- */
+
+/* Ensure migrated content fills the Builder.io section width */
+.migrated-live-content {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* ---- Slick carousel overrides ----------------------------------------- */
 .migrated-live-content .slick-list {
   overflow: hidden !important;
   position: relative;
@@ -168,22 +207,27 @@ _CAROUSEL_CSS_FIXES = """\
 }
 .migrated-live-content .slick-slide {
   flex-shrink: 0;
-  height: auto !important;
-  /* Remove fixed pixel widths captured at source viewport width */
   min-width: 0;
+  box-sizing: border-box;
+  /* Override Slick's captured pixel width (from 1280px render) so slides
+     don't overflow before the carousel reinit JS runs. The JS then sets
+     slide.style.width = percentage as an inline style, which takes
+     precedence over this declaration. */
+  width: auto;
 }
 .migrated-live-content .slick-slide > div {
   height: 100%;
 }
-/* Prevent images inside carousel slides from being cropped */
+/* Carousel images: fill slide width without overriding height.
+   IMPORTANT: do NOT set height:auto here — Magento product images use
+   position:absolute + height:100% inside a padding-bottom aspect-ratio
+   container. Forcing height:auto breaks that layout and hides images. */
 .migrated-live-content .slick-slide img {
   width: 100%;
-  height: auto !important;
   max-width: 100%;
   display: block;
-  object-fit: contain;
 }
-/* Arrow buttons must be visible and clickable */
+/* Arrow buttons must remain visible and clickable inside Builder.io */
 .migrated-live-content .slick-arrow {
   cursor: pointer;
   z-index: 10;
