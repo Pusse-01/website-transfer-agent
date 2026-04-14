@@ -322,6 +322,20 @@ _CAPTURE_SCRIPT = r"""
     rootSelector = root.tagName.toLowerCase();
   }
 
+  // Normalise relative image src attributes on LIVE elements *before* cloning.
+  // The DOM property `img.src` (without getAttribute) always returns the
+  // fully-resolved absolute URL for a live element in the document, whereas
+  // `img.getAttribute("src")` returns the raw HTML attribute which may be a
+  // relative Magento media path like "catalog/product/9/7/image.jpg".
+  // After this step the clone will inherit absolute src attributes, so we
+  // no longer need to rely on `img.currentSrc` (which is empty on clones).
+  root.querySelectorAll("img").forEach(function(liveImg) {
+    var absSrc = liveImg.src;  // DOM property — always absolute for live elements
+    if (absSrc && !absSrc.startsWith("data:") && liveImg.getAttribute("src") !== absSrc) {
+      liveImg.setAttribute("src", absSrc);
+    }
+  });
+
   // Clone so mutations don't affect the live page before other evaluations.
   const clone = root.cloneNode(true);
 
@@ -491,12 +505,15 @@ _CAPTURE_SCRIPT = r"""
                  || img.getAttribute("data-lazy")
                  || img.getAttribute("data-original")
                  || "";
-    // Prefer lazySrc when src is a data: URI placeholder
+    // Prefer lazySrc when src is a data: URI placeholder.
+    // NOTE: img.currentSrc is always empty on detached clone nodes — do NOT
+    // rely on it. The live-element normalization above ensures rawSrc is
+    // already an absolute URL for anything that was in the live DOM.
     const src = (rawSrc.startsWith("data:") && lazySrc)
       ? lazySrc
-      : (img.currentSrc || rawSrc || lazySrc);
+      : (rawSrc || lazySrc);
     if (src && !images.includes(src)) images.push(src);
-    // Normalise src to absolute so Python side doesn't have to.
+    // Ensure the clone's src attribute is the resolved absolute URL.
     if (src && img.getAttribute("src") !== src) img.setAttribute("src", src);
     // Remove lazy-load attributes so Builder.io renders the image immediately
     img.removeAttribute("data-src");

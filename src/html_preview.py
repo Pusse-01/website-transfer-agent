@@ -3,7 +3,41 @@ HTML preview generator for blog posts.
 Generates a self-contained HTML page that can be rendered in an iframe.
 """
 
+import re
+
 from .css_processor import process_html_for_builder
+
+
+def _make_images_absolute(html_content: str, base_url: str) -> str:
+    """Resolve relative <img src> paths to absolute URLs.
+
+    Prevents Streamlit's MediaFileHandler from receiving relative paths and
+    raising 'Bad filename' errors when components.html() renders the iframe.
+
+    Handles the common Magento pattern where images in CMS / blog content are
+    stored as media-relative paths (e.g. ``catalog/product/9/7/image.jpg``)
+    without a leading slash.  The correct absolute URL for those paths is
+    ``<site>/media/catalog/product/...``, so we prepend ``/media/`` when the
+    path doesn't start with ``/`` or a scheme.
+    """
+    if not html_content or not base_url:
+        return html_content
+
+    domain = base_url.rstrip("/")
+    media_base = domain + "/media/"
+
+    def _fix(match: re.Match) -> str:
+        src = match.group(1)
+        if not src or src.startswith(("http://", "https://", "data:", "//", "blob:")):
+            return match.group(0)
+        if src.startswith("/"):
+            # Root-relative path — just prepend the domain
+            return f'src="{domain}{src}"'
+        # Bare relative path (e.g. "catalog/product/..."):
+        # treat as a Magento media-relative path and prepend /media/
+        return f'src="{media_base}{src}"'
+
+    return re.sub(r'src="([^"]*)"', _fix, html_content)
 
 
 def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
@@ -65,6 +99,12 @@ def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:
     meta_html = (
         f'<div class="meta">{"  |  ".join(meta_parts)}</div>' if meta_parts else ""
     )
+
+    # Resolve any remaining relative image URLs (e.g. legacy-scraped content or
+    # old Builder.io entries where image upload failed) so the iframe preview
+    # doesn't send bare paths to Streamlit's MediaFileHandler.
+    if base_url:
+        html_content = _make_images_absolute(html_content, base_url)
 
     body_padding = "0" if is_static_page else "24px"
     body_max_width = "1440px" if is_static_page else "900px"
