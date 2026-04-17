@@ -528,4 +528,11 @@ def _extract_url_key_from_url(url: str) -> str:
     if url_key in ("zh", "en", "sc", "hk", "mo") and len(segments) > 1:
         url_key = segments[-2] if len(segments) >= 2 else url_key
 
+    # The source Magento site serves some pages with a ``.html`` suffix
+    # (e.g. /about-us.html). Builder.io should host them at a clean
+    # extension-free slug, so we strip the suffix here — the Excel
+    # still contains the full URL for scraping.
+    if url_key.lower().endswith(".html"):
+        url_key = url_key[: -len(".html")]
+
     return url_key

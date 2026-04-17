@@ -305,6 +305,8 @@ def is_available() -> bool:
 _CAPTURE_SCRIPT = r"""
 (() => {
   const SELECTORS = {selectors_json};
+  const PAGE_ORIGIN = window.location.origin;
+  const PAGE_HOST = window.location.hostname.replace(/^www\./i, '');
 
   // -------- Find content root --------
   let root = null;
@@ -362,6 +364,37 @@ _CAPTURE_SCRIPT = r"""
   const comments = [];
   while (walker.nextNode()) comments.push(walker.currentNode);
   comments.forEach(c => c.parentNode && c.parentNode.removeChild(c));
+
+  // -------- Rewrite internal <a href> so they don't point at the old platform --------
+  // Turns any link to the source domain into a clean root-relative path, and
+  // strips the ".html" suffix so the migrated site serves extension-free URLs.
+  // External links and anchors are left alone.
+  function cleanInternalHref(raw) {
+    if (!raw) return raw;
+    var trimmed = String(raw).trim();
+    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('mailto:')
+        || trimmed.startsWith('tel:') || trimmed.startsWith('javascript:')) {
+      return raw;
+    }
+    // Resolve to an absolute URL so we can reason about origin reliably.
+    var abs;
+    try { abs = new URL(trimmed, window.location.href); }
+    catch (e) { return raw; }
+
+    var host = abs.hostname.replace(/^www\./i, '');
+    // Only rewrite links that point to the page we're migrating from.
+    if (host && host !== PAGE_HOST) return raw;
+
+    var path = abs.pathname || '/';
+    // Strip trailing .html (preserve any .html segments that are mid-path
+    // by only touching the final segment).
+    path = path.replace(/\.html(\/?)$/i, '$1');
+    return path + (abs.search || '') + (abs.hash || '');
+  }
+
+  clone.querySelectorAll('a[href]').forEach(function(a) {
+    a.setAttribute('href', cleanInternalHref(a.getAttribute('href')));
+  });
 
   // -------- Collect matching CSS rules --------
   const SCOPE = ".migrated-live-content";
@@ -637,22 +670,77 @@ async def _capture_async(
             # data-src. We set src from data-src so that:
             #   (a) img.currentSrc is populated when the capture script runs,
             #   (b) the image_handler can upload all images, not just active ones.
+            #
+            # We also ask Slick to expand its internal lazyLoad cache so slides
+            # that haven't been activated yet (pages 2+ of the carousel) get
+            # their real URLs resolved. Without this, products in later pages
+            # come through as blank cards with just the "新產品" badge.
             try:
                 await page.evaluate(
-                    "() => {"
-                    "  document.querySelectorAll('img').forEach(function(img) {"
+                    "async () => {"
+                    "  function pullLazy(img) {"
                     "    var lazy = img.getAttribute('data-src')"
-                    "           || img.getAttribute('data-lazy')"
-                    "           || img.getAttribute('data-original');"
+                    "            || img.getAttribute('data-lazy')"
+                    "            || img.getAttribute('data-original')"
+                    "            || img.getAttribute('data-srcset');"
                     "    var s = img.getAttribute('src') || '';"
                     "    if (lazy && (s.startsWith('data:') || !s)) {"
                     "      img.src = lazy;"
                     "    }"
+                    "  }"
+                    "  document.querySelectorAll('img').forEach(pullLazy);"
+                    # If jQuery + Slick are present, tell every slider to
+                    # resolve its internal lazy queue.
+                    "  if (window.jQuery && typeof window.jQuery.fn.slick === 'function') {"
+                    "    try {"
+                    "      window.jQuery('.slick-slider').each(function() {"
+                    "        var $s = window.jQuery(this);"
+                    "        try { $s.slick('slickGoTo', 0, true); } catch (e) {}"
+                    "      });"
+                    "    } catch (e) {}"
+                    "  }"
+                    # Force every lazy <img> with data-lazy to its real URL.
+                    "  document.querySelectorAll('img[data-lazy]').forEach(function(img) {"
+                    "    var lazy = img.getAttribute('data-lazy');"
+                    "    if (lazy && img.src !== lazy) img.src = lazy;"
                     "  });"
+                    # Re-pull once more after Slick may have repopulated data-src.
+                    "  document.querySelectorAll('img').forEach(pullLazy);"
                     "}"
                 )
-                # Give the browser a moment to start loading the newly-set srcs.
-                await page.wait_for_timeout(800)
+                # Give the browser time to actually fetch & decode the newly-
+                # set srcs. 800ms wasn't enough for the full product carousel
+                # (user saw empty product cards in the "最新登場" row).
+                await page.wait_for_timeout(2500)
+
+                # Wait for every <img> with a real src to finish loading so
+                # the clone has complete dimensions. Any image still pending
+                # after 8s is left as-is — better than blocking the whole run.
+                try:
+                    await page.evaluate(
+                        "() => Promise.race(["
+                        "  Promise.all(Array.from(document.images).map(function(img){"
+                        "    if (img.complete && img.naturalHeight !== 0) return Promise.resolve();"
+                        "    return new Promise(function(res){"
+                        "      img.addEventListener('load', res, {once:true});"
+                        "      img.addEventListener('error', res, {once:true});"
+                        "    });"
+                        "  })),"
+                        "  new Promise(function(r){ setTimeout(r, 8000); })"
+                        "])"
+                    )
+                except Exception:
+                    pass
+
+                # Fire resize so any JS-driven layout (Slick, Swiper, etc.)
+                # recalculates widths against the current viewport.
+                try:
+                    await page.evaluate(
+                        "() => window.dispatchEvent(new Event('resize'))"
+                    )
+                    await page.wait_for_timeout(400)
+                except Exception:
+                    pass
             except Exception:
                 pass
 

@@ -326,6 +326,61 @@ class ImageHandler:
                 break
         return wrapper
 
+    def rewrite_internal_links(self, html_content: str, source_base_url: str) -> str:
+        """Rewrite <a href> links that point at the old source domain.
+
+        Two goals:
+          1. Strip the source origin so migrated pages don't link back to the
+             old Magento platform.
+          2. Drop the ``.html`` suffix so the new site serves extension-free
+             URLs (the user asked for this explicitly).
+
+        External links, fragment-only anchors, and non-HTTP schemes are left
+        unchanged. Image links (handled elsewhere) are also skipped to avoid
+        double-processing.
+        """
+        if not html_content or not source_base_url:
+            return html_content
+
+        parsed_source = urlparse(source_base_url)
+        source_host = (parsed_source.hostname or "").lower().lstrip("www.")
+        if not source_host:
+            return html_content
+
+        soup = BeautifulSoup(html_content, "html.parser")
+
+        for a in soup.find_all("a", href=True):
+            raw = a["href"].strip()
+            if not raw or raw.startswith(("#", "mailto:", "tel:", "javascript:")):
+                continue
+
+            # Skip image links — those are already handled by the image
+            # pipeline and point to the Builder CDN by now.
+            if self._is_image_url(raw):
+                continue
+
+            # Resolve the href against the source so protocol-relative and
+            # root-relative links are normalised before we inspect the host.
+            resolved = raw if raw.startswith(("http://", "https://")) else urljoin(source_base_url, raw)
+            parsed = urlparse(resolved)
+            href_host = (parsed.hostname or "").lower().lstrip("www.")
+
+            # Only rewrite links that point at the old Magento domain.
+            if href_host and href_host != source_host:
+                continue
+
+            path = parsed.path or "/"
+            # Strip the ``.html`` suffix from the final segment only.
+            path = re.sub(r"\.html(/?)$", r"\1", path, flags=re.IGNORECASE)
+            new_href = path
+            if parsed.query:
+                new_href += "?" + parsed.query
+            if parsed.fragment:
+                new_href += "#" + parsed.fragment
+            a["href"] = new_href
+
+        return str(soup)
+
     def process_thumbnail(self, thumbnail_url: str) -> str | None:
         """Download and upload a thumbnail image to Builder.io."""
         if not thumbnail_url:

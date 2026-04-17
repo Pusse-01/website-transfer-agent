@@ -20,6 +20,21 @@ from .css_processor import process_html_for_builder
 logger = logging.getLogger(__name__)
 
 
+def _clean_url_key(url_key) -> str:
+    """Strip surrounding slashes and a trailing '.html' from a url_key.
+
+    Defensive: the migration agent normalises url_keys before they reach us,
+    but legacy callers or re-migrations could still pass in a value like
+    'about.html'. We always want Builder paths without the extension.
+    """
+    if not url_key:
+        return ""
+    key = str(url_key).strip().strip("/")
+    if key.lower().endswith(".html"):
+        key = key[: -len(".html")]
+    return key
+
+
 # Builder.io Write API rate limits (approximate):
 # - 50 requests per 10 seconds for write operations
 # - We add conservative delays to stay well within limits
@@ -139,8 +154,8 @@ class BuilderClient:
         Returns:
             Dict with 'success' bool and 'data' or 'error'
         """
-        url_key = blog_data.get("url_key", "")
-        url_path = f"/blog/{url_key}"
+        url_key = _clean_url_key(blog_data.get("url_key", ""))
+        url_path = f"/blog/{url_key}" if url_key else "/blog"
 
         # Convert tags to Builder.io format
         raw_tags = blog_data.get("tags", [])
@@ -213,7 +228,7 @@ class BuilderClient:
         Returns:
             Dict with 'success' bool and 'data' or 'error'
         """
-        url_key = page_data.get("url_key", "")
+        url_key = _clean_url_key(page_data.get("url_key", ""))
         # Static pages go directly under root path
         url_path = f"/{url_key}" if url_key else "/"
         pre_processed = bool(page_data.get("_html_already_processed"))

@@ -41,6 +41,22 @@ STATUS_CANCELLED = "cancelled"
 STATUS_NEEDS_REVIEW = "needs_human_review"
 
 
+def _normalize_url_key(url_key) -> str:
+    """Strip '.html' and surrounding slashes from an Excel url_key.
+
+    The source Magento platform serves CMS pages at '/foo.html'. Builder.io
+    should host them at '/foo' — the migrated site is extension-free. This
+    function is the single choke point that every pipeline branch runs url_keys
+    through before building Builder paths or checking for existing entries.
+    """
+    if not url_key:
+        return ""
+    key = str(url_key).strip().strip("/")
+    if key.lower().endswith(".html"):
+        key = key[: -len(".html")]
+    return key
+
+
 class MigrationAgent:
     """Orchestrates page migration from source website to Builder.io."""
 
@@ -155,10 +171,14 @@ class MigrationAgent:
 
         pages_to_migrate = []
         for post in blog_posts:
+            clean_key = _normalize_url_key(post["url_key"])
             pages_to_migrate.append({
-                "url_key": post["url_key"],
+                "url_key": clean_key,
                 "title": post.get("title", ""),
                 "page_type": "blog",
+                # primary_url keeps the original ``.html`` suffix (if any) so
+                # the scraper still hits the live Magento page. The stripped
+                # key is only used for Builder paths.
                 "primary_url": f"{self.source_base_url}{self.blog_path}{post['url_key']}",
                 "original_data": post,
             })
@@ -183,7 +203,7 @@ class MigrationAgent:
         pages_to_migrate = []
         for page in static_pages:
             pages_to_migrate.append({
-                "url_key": page["url_key"],
+                "url_key": _normalize_url_key(page["url_key"]),
                 "title": page.get("title", ""),
                 "page_type": "static",
                 "primary_url": page.get("primary_url", ""),
@@ -209,12 +229,13 @@ class MigrationAgent:
             else:
                 primary_url = f"{self.source_base_url}/{url_key}"
 
+            clean_key = _normalize_url_key(url_key)
             pages_to_migrate.append({
-                "url_key": url_key,
+                "url_key": clean_key,
                 "title": "",
                 "page_type": page_type,
                 "primary_url": primary_url,
-                "original_data": {"url_key": url_key},
+                "original_data": {"url_key": clean_key},
             })
 
         return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback)
@@ -244,7 +265,7 @@ class MigrationAgent:
                            f"Loaded {len(blog_posts)} published blog posts")
             for post in blog_posts:
                 pages_to_migrate.append({
-                    "url_key": post["url_key"],
+                    "url_key": _normalize_url_key(post["url_key"]),
                     "title": post.get("title", ""),
                     "page_type": "blog",
                     "primary_url": f"{self.source_base_url}{self.blog_path}{post['url_key']}",
@@ -258,7 +279,7 @@ class MigrationAgent:
                            f"Loaded {len(static_pages)} static pages")
             for page in static_pages:
                 pages_to_migrate.append({
-                    "url_key": page["url_key"],
+                    "url_key": _normalize_url_key(page["url_key"]),
                     "title": page.get("title", ""),
                     "page_type": "static",
                     "primary_url": page.get("primary_url", ""),
@@ -427,6 +448,20 @@ class MigrationAgent:
                 except Exception as e:
                     self.mlog.warning(url_key, page_type, "images",
                                      f"Image processing error (continuing): {e}")
+
+                # Step 4a: Rewrite internal <a href> links that still point at
+                # the old Magento platform. Live capture already does this in
+                # the browser, but the legacy/fallback scrapers leave hrefs
+                # untouched — without this, migrated pages keep linking back
+                # to the source site.
+                try:
+                    page_data["html_content"] = self.image_handler.rewrite_internal_links(
+                        page_data["html_content"],
+                        source_base_url=self.source_base_url,
+                    )
+                except Exception as e:
+                    self.mlog.warning(url_key, page_type, "transform",
+                                     f"Link rewrite skipped: {e}")
 
                 # Process thumbnail
                 if page_data.get("thumbnail"):
