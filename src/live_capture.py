@@ -195,6 +195,45 @@ _CAROUSEL_CSS_FIXES = """\
   box-sizing: border-box;
 }
 
+/* ---- Typography baseline ---------------------------------------------
+   Builder.io's Custom Code container sometimes applies bold / dark text
+   rules that cascade into our content, which is why migrated pages look
+   heavier than the original. Pin the baseline typography explicitly so
+   our captured rules on .product-name, headings, etc. layer on top of a
+   clean reset rather than on top of Builder.io's chrome.
+---------------------------------------------------------------------- */
+.migrated-live-content,
+.migrated-live-content * {
+  font-weight: inherit;
+  color: inherit;
+}
+.migrated-live-content {
+  font-family: "PingFang HK", "PingFang TC", "Noto Sans TC",
+               "Microsoft JhengHei", "Helvetica Neue", Arial, sans-serif;
+  font-weight: 400;
+  color: #333;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+.migrated-live-content h1,
+.migrated-live-content h2,
+.migrated-live-content h3,
+.migrated-live-content h4,
+.migrated-live-content h5,
+.migrated-live-content h6,
+.migrated-live-content strong,
+.migrated-live-content b {
+  font-weight: 600;
+  color: #1a1a1a;
+}
+.migrated-live-content p,
+.migrated-live-content li,
+.migrated-live-content span,
+.migrated-live-content div {
+  font-weight: inherit;
+}
+
 /* ---- Slick carousel overrides ----------------------------------------- */
 .migrated-live-content .slick-list {
   overflow: hidden !important;
@@ -218,14 +257,21 @@ _CAROUSEL_CSS_FIXES = """\
 .migrated-live-content .slick-slide > div {
   height: 100%;
 }
-/* Carousel images: fill slide width without overriding height.
-   IMPORTANT: do NOT set height:auto here — Magento product images use
-   position:absolute + height:100% inside a padding-bottom aspect-ratio
-   container. Forcing height:auto breaks that layout and hides images. */
+/* Carousel images: contain (not cover) so product photos aren't cropped
+   when the slide's aspect ratio differs from the image's.
+   IMPORTANT: do NOT force height:auto on all product images — Magento's
+   .product-image-photo uses position:absolute + height:100% inside a
+   padding-bottom aspect-ratio box. We target plain <img> children only. */
 .migrated-live-content .slick-slide img {
-  width: 100%;
   max-width: 100%;
   display: block;
+}
+.migrated-live-content .slick-slide .product-image-photo,
+.migrated-live-content .product-image-photo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
 }
 /* Arrow buttons must remain visible and clickable inside Builder.io */
 .migrated-live-content .slick-arrow {
@@ -542,12 +588,29 @@ _CAPTURE_SCRIPT = r"""
     // NOTE: img.currentSrc is always empty on detached clone nodes — do NOT
     // rely on it. The live-element normalization above ensures rawSrc is
     // already an absolute URL for anything that was in the live DOM.
-    const src = (rawSrc.startsWith("data:") && lazySrc)
+    let src = (rawSrc.startsWith("data:") && lazySrc)
       ? lazySrc
       : (rawSrc || lazySrc);
-    if (src && !images.includes(src)) images.push(src);
+    // Last-resort fallback: scan every data-* attribute for a URL.
+    if ((!src || src.startsWith("data:")) && img.attributes) {
+      for (const attr of img.attributes) {
+        const v = (attr.value || "").trim();
+        if (v && !v.startsWith("data:") && /\.(jpe?g|png|gif|webp|svg)(\?|$)/i.test(v)) {
+          src = v;
+          break;
+        }
+      }
+    }
+    // If we STILL don't have a real URL, drop the <img> so the migrated
+    // page doesn't show a browser broken-image icon where a product
+    // photo should be.
+    if (!src || src.startsWith("data:")) {
+      img.parentNode && img.parentNode.removeChild(img);
+      return;
+    }
+    if (!images.includes(src)) images.push(src);
     // Ensure the clone's src attribute is the resolved absolute URL.
-    if (src && img.getAttribute("src") !== src) img.setAttribute("src", src);
+    if (img.getAttribute("src") !== src) img.setAttribute("src", src);
     // Remove lazy-load attributes so Builder.io renders the image immediately
     img.removeAttribute("data-src");
     img.removeAttribute("data-lazy");
@@ -671,10 +734,10 @@ async def _capture_async(
             #   (a) img.currentSrc is populated when the capture script runs,
             #   (b) the image_handler can upload all images, not just active ones.
             #
-            # We also ask Slick to expand its internal lazyLoad cache so slides
-            # that haven't been activated yet (pages 2+ of the carousel) get
-            # their real URLs resolved. Without this, products in later pages
-            # come through as blank cards with just the "新產品" badge.
+            # slickGoTo(0) alone doesn't hydrate pages 2+ of a carousel — Slick
+            # only populates data-lazy for the slide range it's about to show.
+            # We step through every slide index on every slider so every
+            # product image in the track gets a real URL.
             try:
                 await page.evaluate(
                     "async () => {"
@@ -683,39 +746,74 @@ async def _capture_async(
                     "            || img.getAttribute('data-lazy')"
                     "            || img.getAttribute('data-original')"
                     "            || img.getAttribute('data-srcset');"
+                    "    if (!lazy) {"
+                    "      var ss = img.getAttribute('srcset') || '';"
+                    "      if (ss) lazy = ss.split(',')[0].trim().split(/\\s+/)[0];"
+                    "    }"
                     "    var s = img.getAttribute('src') || '';"
                     "    if (lazy && (s.startsWith('data:') || !s)) {"
                     "      img.src = lazy;"
                     "    }"
                     "  }"
-                    "  document.querySelectorAll('img').forEach(pullLazy);"
-                    # If jQuery + Slick are present, tell every slider to
-                    # resolve its internal lazy queue.
-                    "  if (window.jQuery && typeof window.jQuery.fn.slick === 'function') {"
-                    "    try {"
-                    "      window.jQuery('.slick-slider').each(function() {"
-                    "        var $s = window.jQuery(this);"
-                    "        try { $s.slick('slickGoTo', 0, true); } catch (e) {}"
-                    "      });"
-                    "    } catch (e) {}"
+                    ""
+                    "  function findJQuery() {"
+                    "    if (window.jQuery && window.jQuery.fn && window.jQuery.fn.slick) return window.jQuery;"
+                    "    if (window.$ && window.$.fn && window.$.fn.slick) return window.$;"
+                    "    if (window.require) {"
+                    "      try {"
+                    "        var j = window.require('jquery');"
+                    "        if (j && j.fn && j.fn.slick) return j;"
+                    "      } catch (e) {}"
+                    "    }"
+                    "    return null;"
                     "  }"
-                    # Force every lazy <img> with data-lazy to its real URL.
-                    "  document.querySelectorAll('img[data-lazy]').forEach(function(img) {"
-                    "    var lazy = img.getAttribute('data-lazy');"
-                    "    if (lazy && img.src !== lazy) img.src = lazy;"
+                    ""
+                    "  document.querySelectorAll('img').forEach(pullLazy);"
+                    ""
+                    "  var $$ = findJQuery();"
+                    "  if ($$) {"
+                    "    var sliders = document.querySelectorAll('.slick-slider, .slick-initialized');"
+                    "    for (var i = 0; i < sliders.length; i++) {"
+                    "      try {"
+                    "        var $s = $$(sliders[i]);"
+                    "        var slides = sliders[i].querySelectorAll('.slick-slide:not(.slick-cloned)');"
+                    "        for (var j = 0; j < slides.length; j++) {"
+                    "          try { $s.slick('slickGoTo', j, true); } catch (e) {}"
+                    "          await new Promise(function(r){ setTimeout(r, 120); });"
+                    "          sliders[i].querySelectorAll('img').forEach(pullLazy);"
+                    "        }"
+                    "        try { $s.slick('slickGoTo', 0, true); } catch (e) {}"
+                    "      } catch (e) {}"
+                    "    }"
+                    "  }"
+                    ""
+                    # One more pass: resolve any <img> whose src still begins
+                    # with data:, by walking every data-* attribute for a URL.
+                    "  document.querySelectorAll('img').forEach(function(img) {"
+                    "    var s = img.getAttribute('src') || '';"
+                    "    if (!s.startsWith('data:') && s) return;"
+                    "    for (var a = 0; a < img.attributes.length; a++) {"
+                    "      var attr = img.attributes[a];"
+                    "      var v = (attr.value || '').trim();"
+                    "      if (!v || v.startsWith('data:')) continue;"
+                    "      if (/\\.(jpe?g|png|gif|webp|svg)(\\?|$)/i.test(v)) {"
+                    "        img.src = v;"
+                    "        break;"
+                    "      }"
+                    "    }"
                     "  });"
-                    # Re-pull once more after Slick may have repopulated data-src.
+                    ""
                     "  document.querySelectorAll('img').forEach(pullLazy);"
                     "}"
                 )
                 # Give the browser time to actually fetch & decode the newly-
-                # set srcs. 800ms wasn't enough for the full product carousel
-                # (user saw empty product cards in the "最新登場" row).
-                await page.wait_for_timeout(2500)
+                # set srcs. Slick can take a while to settle after stepping
+                # through every slide.
+                await page.wait_for_timeout(3000)
 
                 # Wait for every <img> with a real src to finish loading so
                 # the clone has complete dimensions. Any image still pending
-                # after 8s is left as-is — better than blocking the whole run.
+                # after 10s is left as-is — better than blocking the whole run.
                 try:
                     await page.evaluate(
                         "() => Promise.race(["
@@ -726,7 +824,7 @@ async def _capture_async(
                         "      img.addEventListener('error', res, {once:true});"
                         "    });"
                         "  })),"
-                        "  new Promise(function(r){ setTimeout(r, 8000); })"
+                        "  new Promise(function(r){ setTimeout(r, 10000); })"
                         "])"
                     )
                 except Exception:
