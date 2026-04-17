@@ -8,8 +8,57 @@ import re
 from .css_processor import process_html_for_builder
 
 
+_MAGENTO_MEDIA_PREFIXES = (
+    "catalog/",
+    "wysiwyg/",
+    "amasty/",
+    "amblog/",
+    "mageplaza/",
+    "magefan_blog/",
+)
+
+
+def _resolve_one_url(url: str, domain: str, page_origin: str) -> str:
+    """Resolve a single URL token to an absolute URL, or return it unchanged.
+
+    Used for both bare ``src`` attributes and individual URL entries inside a
+    ``srcset`` attribute.  Preserves absolute URLs, ``data:``, ``blob:``, and
+    protocol-relative URLs.  For root-relative paths we prepend the site
+    domain; for bare Magento media paths (``catalog/...``, ``wysiwyg/...``) we
+    additionally prepend ``/media/`` to match Magento's CDN layout.
+    """
+    u = (url or "").strip()
+    if not u or u.startswith(("http://", "https://", "data:", "blob:", "//", "#", "mailto:", "tel:", "javascript:")):
+        return url
+    if u.startswith("/"):
+        return domain + u
+    lowered = u.lower()
+    if any(lowered.startswith(p) for p in _MAGENTO_MEDIA_PREFIXES):
+        return domain + "/media/" + u
+    # Other relative paths (rare) — resolve against the source page origin.
+    if page_origin:
+        return page_origin.rstrip("/") + "/" + u.lstrip("./")
+    return domain + "/" + u.lstrip("./")
+
+
+def _fix_srcset(value: str, domain: str, page_origin: str) -> str:
+    """Resolve every URL in a ``srcset="url [descriptor], url [descriptor]"``."""
+    parts = []
+    for entry in value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        tokens = entry.split(None, 1)
+        url = _resolve_one_url(tokens[0], domain, page_origin)
+        if len(tokens) > 1:
+            parts.append(f"{url} {tokens[1]}")
+        else:
+            parts.append(url)
+    return ", ".join(parts)
+
+
 def _make_images_absolute(html_content: str, base_url: str) -> str:
-    """Resolve relative <img src> paths to absolute URLs.
+    """Resolve relative image paths to absolute URLs.
 
     Prevents Streamlit's MediaFileHandler from receiving relative paths and
     raising 'Bad filename' errors when components.html() renders the iframe.
@@ -18,26 +67,35 @@ def _make_images_absolute(html_content: str, base_url: str) -> str:
     stored as media-relative paths (e.g. ``catalog/product/9/7/image.jpg``)
     without a leading slash.  The correct absolute URL for those paths is
     ``<site>/media/catalog/product/...``, so we prepend ``/media/`` when the
-    path doesn't start with ``/`` or a scheme.
+    path starts with a known Magento media prefix.
+
+    Covers:
+        * ``src="..."`` on ``<img>``, ``<source>``, and ``<video>``
+        * ``srcset="..."`` on ``<img>`` and ``<source>``
     """
     if not html_content or not base_url:
         return html_content
 
     domain = base_url.rstrip("/")
-    media_base = domain + "/media/"
+    # If base_url is a full page URL, page_origin is useful for relative
+    # fallbacks.  If base_url is just a scheme+host, domain == page_origin.
+    page_origin = domain
 
-    def _fix(match: re.Match) -> str:
-        src = match.group(1)
-        if not src or src.startswith(("http://", "https://", "data:", "//", "blob:")):
-            return match.group(0)
-        if src.startswith("/"):
-            # Root-relative path — just prepend the domain
-            return f'src="{domain}{src}"'
-        # Bare relative path (e.g. "catalog/product/..."):
-        # treat as a Magento media-relative path and prepend /media/
-        return f'src="{media_base}{src}"'
+    def _fix_src(match: re.Match) -> str:
+        prefix, src, suffix = match.group(1), match.group(2), match.group(3)
+        resolved = _resolve_one_url(src, domain, page_origin)
+        return f'{prefix}{resolved}{suffix}'
 
-    return re.sub(r'src="([^"]*)"', _fix, html_content)
+    def _fix_srcset_attr(match: re.Match) -> str:
+        prefix, value, suffix = match.group(1), match.group(2), match.group(3)
+        resolved = _fix_srcset(value, domain, page_origin)
+        return f'{prefix}{resolved}{suffix}'
+
+    # src="..."  (also catches <source src=...> and <video src=...>)
+    html_content = re.sub(r'(\bsrc=")([^"]*)(")', _fix_src, html_content)
+    # srcset="..."  (on <img> and <source>)
+    html_content = re.sub(r'(\bsrcset=")([^"]*)(")', _fix_srcset_attr, html_content)
+    return html_content
 
 
 def generate_blog_preview_html(post_data: dict, base_url: str = "") -> str:

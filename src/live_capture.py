@@ -375,12 +375,88 @@ _CAPTURE_SCRIPT = r"""
   // fully-resolved absolute URL for a live element in the document, whereas
   // `img.getAttribute("src")` returns the raw HTML attribute which may be a
   // relative Magento media path like "catalog/product/9/7/image.jpg".
-  // After this step the clone will inherit absolute src attributes, so we
-  // no longer need to rely on `img.currentSrc` (which is empty on clones).
+  //
+  // But there's a subtlety: if the raw attribute is a bare Magento path such
+  // as "catalog/product/9/7/image.jpg" (no leading slash, no /media/ prefix),
+  // `img.src` resolves it against the current document URL — which is the
+  // blog page, not the media root — producing e.g.
+  //     https://www.pricerite.com.hk/hk/zh/blog-post/catalog/product/...
+  // That URL 404s.  Magento serves the actual file from /media/catalog/... ,
+  // so for these well-known Magento media prefixes we force-prefix /media/
+  // before letting the browser resolve the URL.
+  var MAGENTO_MEDIA_PREFIXES = [
+    "catalog/", "wysiwyg/", "amasty/", "amblog/", "mageplaza/", "magefan_blog/"
+  ];
+  function magentoMediaAbs(raw) {
+    if (!raw) return raw;
+    var s = String(raw).trim();
+    if (!s || s.startsWith("data:") || s.startsWith("blob:")
+        || s.startsWith("http://") || s.startsWith("https://")
+        || s.startsWith("//") || s.startsWith("/")) {
+      return s;
+    }
+    var low = s.toLowerCase();
+    for (var i = 0; i < MAGENTO_MEDIA_PREFIXES.length; i++) {
+      if (low.startsWith(MAGENTO_MEDIA_PREFIXES[i])) {
+        return PAGE_ORIGIN + "/media/" + s;
+      }
+    }
+    // Not a Magento media path — let the browser resolve relative to the doc.
+    return s;
+  }
+  function normalizeSrcset(value) {
+    if (!value) return value;
+    var out = [];
+    var entries = value.split(",");
+    for (var k = 0; k < entries.length; k++) {
+      var e = entries[k].trim();
+      if (!e) continue;
+      var sp = e.split(/\s+/);
+      var url = magentoMediaAbs(sp[0]);
+      if (sp.length > 1) {
+        out.push(url + " " + sp.slice(1).join(" "));
+      } else {
+        out.push(url);
+      }
+    }
+    return out.join(", ");
+  }
+
   root.querySelectorAll("img").forEach(function(liveImg) {
+    // First, if the raw attribute is a Magento media path, prefix /media/
+    // before the browser has a chance to resolve against the page URL.
+    var rawAttr = liveImg.getAttribute("src");
+    if (rawAttr) {
+      var fixed = magentoMediaAbs(rawAttr);
+      if (fixed !== rawAttr) liveImg.setAttribute("src", fixed);
+    }
     var absSrc = liveImg.src;  // DOM property — always absolute for live elements
     if (absSrc && !absSrc.startsWith("data:") && liveImg.getAttribute("src") !== absSrc) {
       liveImg.setAttribute("src", absSrc);
+    }
+    // srcset on <img> — normalize every URL in the list.
+    var ss = liveImg.getAttribute("srcset");
+    if (ss) {
+      var fixedSs = normalizeSrcset(ss);
+      if (fixedSs !== ss) liveImg.setAttribute("srcset", fixedSs);
+    }
+  });
+  // <source> elements inside <picture>/<video> — same treatment.
+  root.querySelectorAll("source").forEach(function(src) {
+    var s = src.getAttribute("src");
+    if (s) {
+      var fixed = magentoMediaAbs(s);
+      if (fixed !== s) src.setAttribute("src", fixed);
+      try {
+        if (src.src && !src.src.startsWith("data:") && src.getAttribute("src") !== src.src) {
+          src.setAttribute("src", src.src);
+        }
+      } catch (e) {}
+    }
+    var ss = src.getAttribute("srcset");
+    if (ss) {
+      var fixedSs = normalizeSrcset(ss);
+      if (fixedSs !== ss) src.setAttribute("srcset", fixedSs);
     }
   });
 
@@ -611,11 +687,35 @@ _CAPTURE_SCRIPT = r"""
     if (!images.includes(src)) images.push(src);
     // Ensure the clone's src attribute is the resolved absolute URL.
     if (img.getAttribute("src") !== src) img.setAttribute("src", src);
+    // Normalize any srcset so Streamlit's preview iframe never receives a
+    // bare Magento path (which would 404 against the localhost base URL).
+    var imgSs = img.getAttribute("srcset");
+    if (imgSs) {
+      var fixedSs = normalizeSrcset(imgSs);
+      if (fixedSs !== imgSs) img.setAttribute("srcset", fixedSs);
+    }
     // Remove lazy-load attributes so Builder.io renders the image immediately
     img.removeAttribute("data-src");
     img.removeAttribute("data-lazy");
     img.removeAttribute("data-original");
     if (img.getAttribute("loading") === "lazy") img.setAttribute("loading", "eager");
+  });
+
+  // Normalize <source> tags on the clone the same way.  <picture> elements
+  // on Magento product pages use <source srcset="..."> for the responsive
+  // image, and if those remain as relative Magento paths the browser
+  // resolves them against the wrong base URL and fails to load.
+  clone.querySelectorAll("source").forEach(function(srcEl) {
+    var s = srcEl.getAttribute("src");
+    if (s) {
+      var fixed = magentoMediaAbs(s);
+      if (fixed !== s) srcEl.setAttribute("src", fixed);
+    }
+    var ss = srcEl.getAttribute("srcset");
+    if (ss) {
+      var fixedSs = normalizeSrcset(ss);
+      if (fixedSs !== ss) srcEl.setAttribute("srcset", fixedSs);
+    }
   });
 
   // -------- Meta --------
@@ -741,6 +841,27 @@ async def _capture_async(
             try:
                 await page.evaluate(
                     "async () => {"
+                    "  var ORIGIN = window.location.origin;"
+                    "  var MAGENTO_PREFIXES = ["
+                    "    'catalog/','wysiwyg/','amasty/','amblog/','mageplaza/','magefan_blog/'"
+                    "  ];"
+                    # Bare Magento paths like 'catalog/product/9/7/img.jpg' must
+                    # be resolved as ORIGIN + '/media/' + path, not against the
+                    # current document URL (which would yield a 404).
+                    "  function magentoAbs(raw) {"
+                    "    if (!raw) return raw;"
+                    "    var t = String(raw).trim();"
+                    "    if (!t || t.startsWith('data:') || t.startsWith('blob:')"
+                    "        || t.startsWith('http://') || t.startsWith('https://')"
+                    "        || t.startsWith('//') || t.startsWith('/')) return t;"
+                    "    var low = t.toLowerCase();"
+                    "    for (var p = 0; p < MAGENTO_PREFIXES.length; p++) {"
+                    "      if (low.startsWith(MAGENTO_PREFIXES[p])) {"
+                    "        return ORIGIN + '/media/' + t;"
+                    "      }"
+                    "    }"
+                    "    return t;"
+                    "  }"
                     "  function pullLazy(img) {"
                     "    var lazy = img.getAttribute('data-src')"
                     "            || img.getAttribute('data-lazy')"
@@ -752,7 +873,12 @@ async def _capture_async(
                     "    }"
                     "    var s = img.getAttribute('src') || '';"
                     "    if (lazy && (s.startsWith('data:') || !s)) {"
-                    "      img.src = lazy;"
+                    "      img.src = magentoAbs(lazy);"
+                    "    } else if (s && !s.startsWith('data:')) {"
+                    # Catch images whose original src was already a bare
+                    # Magento path that the page loaded incorrectly.
+                    "      var fixed = magentoAbs(s);"
+                    "      if (fixed !== s) img.src = fixed;"
                     "    }"
                     "  }"
                     ""
@@ -797,9 +923,26 @@ async def _capture_async(
                     "      var v = (attr.value || '').trim();"
                     "      if (!v || v.startsWith('data:')) continue;"
                     "      if (/\\.(jpe?g|png|gif|webp|svg)(\\?|$)/i.test(v)) {"
-                    "        img.src = v;"
+                    "        img.src = magentoAbs(v);"
                     "        break;"
                     "      }"
+                    "    }"
+                    "  });"
+                    # <source> elements inside <picture>: if their srcset or
+                    # src is a bare Magento path the browser never fetches
+                    # the right file.  Rewrite to /media/-absolute URL here.
+                    "  document.querySelectorAll('source').forEach(function(src) {"
+                    "    var s = src.getAttribute('src');"
+                    "    if (s) { var f = magentoAbs(s); if (f !== s) src.setAttribute('src', f); }"
+                    "    var ss = src.getAttribute('srcset');"
+                    "    if (ss) {"
+                    "      var parts = ss.split(',').map(function(p){"
+                    "        p = p.trim(); if (!p) return '';"
+                    "        var sp = p.split(/\\s+/);"
+                    "        var u = magentoAbs(sp[0]);"
+                    "        return sp.length > 1 ? (u + ' ' + sp.slice(1).join(' ')) : u;"
+                    "      }).filter(Boolean).join(', ');"
+                    "      if (parts !== ss) src.setAttribute('srcset', parts);"
                     "    }"
                     "  });"
                     ""
