@@ -559,6 +559,119 @@ with tab_preview:
                     mime="application/json",
                 )
 
+            # --------------------------------------------------------------
+            # Migrate & Publish from the preview
+            # --------------------------------------------------------------
+            # One-click "looks good — ship it" flow.  If an entry with this
+            # slug already exists in Builder.io it is deleted first so the
+            # fresh capture replaces it cleanly.
+            st.divider()
+            st.markdown("### Migrate & Publish")
+            st.caption(
+                "Upload the previewed page to Builder.io and publish it. "
+                "If an entry with the same URL key already exists, it will be "
+                "**deleted** first and replaced with this fresh capture."
+            )
+
+            if not builder_private_key or builder_private_key == "your_builder_private_api_key_here":
+                st.info(
+                    "Enter your Builder.io **Private API Key** in the sidebar "
+                    "to enable publishing from this preview."
+                )
+            else:
+                if st.button(
+                    "Migrate & Publish This Page",
+                    type="primary",
+                    key=f"publish_preview_{preview_key}",
+                ):
+                    with st.spinner("Migrating and publishing..."):
+                        try:
+                            page_type = post_data.get("page_type", "blog")
+
+                            pub_client = BuilderClient(
+                                api_key=builder_private_key,
+                                model_name=(
+                                    builder_blog_model
+                                    if page_type == "blog"
+                                    else builder_page_model
+                                ),
+                                blog_model=builder_blog_model,
+                                page_model=builder_page_model,
+                                public_key=builder_public_key,
+                            )
+                            model = (
+                                pub_client.blog_model
+                                if page_type == "blog"
+                                else pub_client.page_model
+                            )
+
+                            # 1. Delete existing entry if any
+                            existing = pub_client.check_entry_exists(
+                                post_data.get("url_key", ""), model_override=model
+                            )
+                            if existing and existing.get("id"):
+                                st.write(f"Found existing entry `{existing['id']}` — deleting...")
+                                del_res = pub_client.delete_entry(
+                                    existing["id"], model_override=model
+                                )
+                                if not del_res.get("success"):
+                                    st.error(
+                                        "Could not delete existing entry: "
+                                        f"{del_res.get('error', 'unknown error')}"
+                                    )
+                                    st.stop()
+
+                            # 2. Run the full image pipeline and link rewrite
+                            upload_data = dict(post_data)
+                            img_handler = ImageHandler(builder_api_key=builder_private_key)
+                            try:
+                                st.write("Uploading images to Builder.io CDN...")
+                                new_html, mappings = img_handler.process_images_in_html(
+                                    upload_data["html_content"], base_url=source_url
+                                )
+                                upload_data["html_content"] = new_html
+                                st.write(f"Uploaded {len(mappings)} image(s).")
+                            except Exception as e:
+                                st.warning(f"Image upload partially failed: {e}")
+                            try:
+                                upload_data["html_content"] = img_handler.rewrite_internal_links(
+                                    upload_data["html_content"], source_base_url=source_url
+                                )
+                            except Exception as e:
+                                st.warning(f"Link rewrite skipped: {e}")
+                            if upload_data.get("thumbnail"):
+                                try:
+                                    thumb = img_handler.process_thumbnail(upload_data["thumbnail"])
+                                    if thumb:
+                                        upload_data["thumbnail"] = thumb
+                                except Exception as e:
+                                    st.warning(f"Thumbnail upload skipped: {e}")
+
+                            # 3. Create fresh entry, published
+                            api_res = pub_client.create_entry(
+                                upload_data, page_type=page_type, publish=True,
+                            )
+                            if api_res.get("success"):
+                                new_id = api_res.get("data", {}).get("id", "")
+                                st.success(
+                                    f"Published to Builder.io (id: `{new_id}`, model: `{model}`)."
+                                )
+                                preview_url = pub_client.get_preview_url(
+                                    new_id, model_override=model
+                                )
+                                if preview_url:
+                                    st.markdown(f"[Open in Builder.io]({preview_url})")
+                            else:
+                                st.error(
+                                    "Publish failed: "
+                                    f"{api_res.get('error', 'unknown error')}"
+                                )
+                                details = api_res.get("details")
+                                if details:
+                                    st.code(details, language="json")
+                        except Exception as e:
+                            st.error(f"Exception during publish: {e}")
+
 
 # ========================== TAB 3: RUN MIGRATION ==========================
 with tab_pipeline:

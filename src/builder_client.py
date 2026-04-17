@@ -491,6 +491,38 @@ class BuilderClient:
             logger.error(f"Failed to publish entry {entry_id}: {e}")
             return {"success": False, "error": str(e)}
 
+    def delete_entry(self, entry_id: str, model_override: str = None) -> dict:
+        """Delete a Builder.io content entry by ID.
+
+        Uses the Write API: DELETE /api/v1/write/<model>/<id>.  Used by the
+        "Migrate & Publish" flow when an entry with the same slug already
+        exists and the user wants to replace it with a freshly-captured
+        version.
+        """
+        model = model_override or self.model_name
+        url = f"{self.BASE_URL}/{model}/{entry_id}"
+        self._rate_limit(WRITE_DELAY_SECONDS)
+        try:
+            response = self.session.delete(url, timeout=60)
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", 10))
+                time.sleep(retry_after)
+                response = self.session.delete(url, timeout=60)
+            response.raise_for_status()
+            logger.info(f"Deleted entry {entry_id} (model: {model})")
+            return {"success": True}
+        except requests.exceptions.HTTPError as e:
+            error_body = ""
+            try:
+                error_body = e.response.text
+            except Exception:
+                pass
+            logger.error(f"Failed to delete entry {entry_id}: {e} - {error_body}")
+            return {"success": False, "error": str(e), "details": error_body}
+        except Exception as e:
+            logger.error(f"Failed to delete entry {entry_id}: {e}")
+            return {"success": False, "error": str(e)}
+
     def unpublish_entry(self, entry_id: str, model_override: str = None) -> dict:
         """Unpublish (set to draft) a single entry by its Builder.io ID."""
         model = model_override or self.model_name

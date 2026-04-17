@@ -279,6 +279,80 @@ _CAROUSEL_CSS_FIXES = """\
   z-index: 10;
   pointer-events: auto !important;
 }
+
+/* ---- Equal-height cards in Magento Page Builder column groups ---------
+   The original uses `display:flex` on the row with each column as a flex
+   child, so cards stretch to the tallest sibling.  Without the original
+   layout JS we enforce that with plain CSS.  We also unlock any
+   max-height / line-clamp that would crop text at three lines. */
+.migrated-live-content [data-content-type="row"],
+.migrated-live-content [data-content-type="column-group"],
+.migrated-live-content .pagebuilder-column-group,
+.migrated-live-content .pagebuilder-column-line {
+  display: flex !important;
+  flex-wrap: wrap;
+  align-items: stretch !important;
+}
+.migrated-live-content [data-content-type="column"],
+.migrated-live-content .pagebuilder-column {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  height: auto !important;
+  min-height: 0;
+}
+.migrated-live-content [data-content-type="column"] > *,
+.migrated-live-content .pagebuilder-column > * {
+  flex: 0 0 auto;
+}
+/* Let every card body show all its text — Magento Page Builder's default
+   stylesheet clamps text-content blocks at a fixed height via overflow:
+   hidden which causes the "lower part cropped out" issue. */
+.migrated-live-content [data-content-type="text"],
+.migrated-live-content [data-content-type="html"],
+.migrated-live-content .pagebuilder-column [data-content-type="text"],
+.migrated-live-content .pagebuilder-column [data-content-type="html"] {
+  max-height: none !important;
+  overflow: visible !important;
+  -webkit-line-clamp: unset !important;
+  display: block !important;
+}
+.migrated-live-content .pagebuilder-column p,
+.migrated-live-content .pagebuilder-column h1,
+.migrated-live-content .pagebuilder-column h2,
+.migrated-live-content .pagebuilder-column h3,
+.migrated-live-content .pagebuilder-column h4,
+.migrated-live-content .pagebuilder-column h5,
+.migrated-live-content .pagebuilder-column h6,
+.migrated-live-content .pagebuilder-column li {
+  overflow: visible !important;
+  max-height: none !important;
+  -webkit-line-clamp: unset !important;
+  text-overflow: clip !important;
+  white-space: normal !important;
+}
+
+/* ---- Mobile responsive: stack multi-column rows on small screens ------
+   The original Magento Page Builder uses @media queries that turn
+   multi-column rows into a vertical stack (or a Slick mobile slider) on
+   viewports < 768px.  Those rules sometimes get lost in our scoped CSS,
+   which leaves the narrow columns side-by-side and each column's text
+   wraps one-character-per-line.  Force the stack explicitly. */
+@media (max-width: 767px) {
+  .migrated-live-content [data-content-type="row"],
+  .migrated-live-content [data-content-type="column-group"],
+  .migrated-live-content .pagebuilder-column-group,
+  .migrated-live-content .pagebuilder-column-line {
+    flex-direction: column !important;
+  }
+  .migrated-live-content [data-content-type="column"],
+  .migrated-live-content .pagebuilder-column {
+    width: 100% !important;
+    max-width: 100% !important;
+    flex-basis: auto !important;
+    margin-bottom: 16px;
+  }
+}
 """
 
 
@@ -659,6 +733,8 @@ _CAPTURE_SCRIPT = r"""
     const lazySrc = img.getAttribute("data-src")
                  || img.getAttribute("data-lazy")
                  || img.getAttribute("data-original")
+                 || img.getAttribute("data-lazy-src")
+                 || img.getAttribute("data-pb-image-url")
                  || "";
     // Prefer lazySrc when src is a data: URI placeholder.
     // NOTE: img.currentSrc is always empty on detached clone nodes — do NOT
@@ -667,14 +743,27 @@ _CAPTURE_SCRIPT = r"""
     let src = (rawSrc.startsWith("data:") && lazySrc)
       ? lazySrc
       : (rawSrc || lazySrc);
-    // Last-resort fallback: scan every data-* attribute for a URL.
+    // Last-resort fallback: scan every attribute for a URL that looks like
+    // an image (any data-* attribute, srcset, etc.).  We accept both
+    // media-extension paths AND bare Magento /media/ paths.
     if ((!src || src.startsWith("data:")) && img.attributes) {
       for (const attr of img.attributes) {
         const v = (attr.value || "").trim();
-        if (v && !v.startsWith("data:") && /\.(jpe?g|png|gif|webp|svg)(\?|$)/i.test(v)) {
+        if (!v || v.startsWith("data:")) continue;
+        const isImageExt = /\.(jpe?g|png|gif|webp|svg)(\?|$)/i.test(v);
+        const isMagentoMedia = /(\/media\/|\/catalog\/|\/wysiwyg\/|\/amasty\/)/i.test(v);
+        if (isImageExt || isMagentoMedia) {
           src = v;
           break;
         }
+      }
+    }
+    // Parse the first URL out of srcset as a final fallback.
+    if ((!src || src.startsWith("data:"))) {
+      const ss = img.getAttribute("srcset") || "";
+      if (ss) {
+        const firstUrl = ss.split(",")[0].trim().split(/\s+/)[0];
+        if (firstUrl && !firstUrl.startsWith("data:")) src = firstUrl;
       }
     }
     // If we STILL don't have a real URL, drop the <img> so the migrated
@@ -812,16 +901,40 @@ async def _capture_async(
             if extra_wait_ms > 0:
                 await page.wait_for_timeout(extra_wait_ms)
 
-            # Scroll to bottom to trigger lazy-loaded images.
+            # Scroll to bottom to trigger lazy-loaded images and AJAX-loaded
+            # carousels (e.g. "Related Products" blocks that only fetch their
+            # image data once the element scrolls into view).  Two full passes
+            # with longer dwell times so below-the-fold Slick carousels have
+            # a chance to fetch their tile images before we capture.
             try:
                 await page.evaluate(
                     "async () => {"
-                    "  const h = document.body.scrollHeight;"
-                    "  for (let y = 0; y < h; y += 400) {"
-                    "    window.scrollTo(0, y);"
-                    "    await new Promise(r => setTimeout(r, 50));"
+                    "  const step = 320;"
+                    "  const h = () => document.body.scrollHeight;"
+                    "  for (let pass = 0; pass < 2; pass++) {"
+                    "    let y = 0;"
+                    "    while (y < h()) {"
+                    "      window.scrollTo(0, y);"
+                    "      await new Promise(r => setTimeout(r, 150));"
+                    "      y += step;"
+                    "    }"
+                    "    window.scrollTo(0, h());"
+                    "    await new Promise(r => setTimeout(r, 800));"
+                    "  }"
+                    # Explicitly scroll every Slick slider / product grid into
+                    # view and sit there for a moment so Magento's own
+                    # intersection-observer lazy-load and AJAX calls fire.
+                    "  const targets = document.querySelectorAll("
+                    "    '.slick-slider, [data-content-type=\"products\"],"
+                    "     .products-list, .block-products-list, .products-grid,"
+                    "     .product-item, .product-items'"
+                    "  );"
+                    "  for (const el of targets) {"
+                    "    try { el.scrollIntoView({block:'center'}); } catch(e) {}"
+                    "    await new Promise(r => setTimeout(r, 400));"
                     "  }"
                     "  window.scrollTo(0, 0);"
+                    "  await new Promise(r => setTimeout(r, 300));"
                     "}"
                 )
             except Exception:
