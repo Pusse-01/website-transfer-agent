@@ -235,6 +235,15 @@ _CAROUSEL_CSS_FIXES = """\
 }
 
 /* ---- Slick carousel overrides ----------------------------------------- */
+.migrated-live-content .slick-slider {
+  /* A Slick slider sitting inside a flex column collapses to its intrinsic
+     (track) width if we don't force it wide, which is why later carousels
+     on the page sometimes render tiny compared to the first. */
+  width: 100% !important;
+  min-width: 0;
+  box-sizing: border-box;
+  position: relative;
+}
 .migrated-live-content .slick-list {
   overflow: hidden !important;
   position: relative;
@@ -253,6 +262,7 @@ _CAROUSEL_CSS_FIXES = """\
      slide.style.width = percentage as an inline style, which takes
      precedence over this declaration. */
   width: auto;
+  height: auto;
 }
 .migrated-live-content .slick-slide > div {
   height: 100%;
@@ -266,13 +276,6 @@ _CAROUSEL_CSS_FIXES = """\
   max-width: 100%;
   display: block;
 }
-.migrated-live-content .slick-slide .product-image-photo,
-.migrated-live-content .product-image-photo {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  object-position: center;
-}
 /* Arrow buttons must remain visible and clickable inside Builder.io */
 .migrated-live-content .slick-arrow {
   cursor: pointer;
@@ -280,18 +283,95 @@ _CAROUSEL_CSS_FIXES = """\
   pointer-events: auto !important;
 }
 
+/* ---- Magento product card: preserve aspect-ratio image container -------
+   Magento renders each product tile as:
+     .product-item > .product-item-info > .product-item-photo
+        > .product-image-container
+          > .product-image-wrapper  (padding-bottom:%, position:relative)
+            > .product-image-photo  (position:absolute; width/height 100%)
+   The padding-bottom trick collapses to 0 if a parent flex rule forces
+   `height: 100%` on the wrapper, which cropped off the bottom of every
+   product photo in the carousels. Pin the expected sizing explicitly so
+   captured rules (and our own overrides further below) can't break it. */
+.migrated-live-content .product-item,
+.migrated-live-content .product-item-info {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  height: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+}
+.migrated-live-content .product-item-photo,
+.migrated-live-content .product-image-container {
+  display: block;
+  width: 100% !important;
+  max-width: 100%;
+  height: auto !important;
+  box-sizing: border-box;
+}
+.migrated-live-content .product-image-wrapper {
+  display: block !important;
+  position: relative !important;
+  width: 100% !important;
+  /* Magento sets padding-bottom (e.g. 100%) to establish the aspect ratio;
+     keep the wrapper height elastic so that trick still works. Fall back
+     to a 1:1 ratio on wrappers whose padding-bottom rule got stripped. */
+  height: auto;
+  min-height: 0;
+  padding-bottom: 100%;
+  overflow: hidden;
+}
+/* If the captured Magento CSS provided its own padding-bottom on the
+   wrapper (typical value is `padding-bottom: 100%;` but some sites use
+   125%, 75%, etc.), that more specific declaration wins because the
+   selector inside @media/regular rules is more specific than ours. */
+.migrated-live-content .product-image-photo {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+  object-position: center !important;
+}
+/* Some card templates drop the wrapper and use a plain <img> — make sure
+   those still get a sensible height instead of stretching. */
+.migrated-live-content .product-item-photo > img,
+.migrated-live-content .product-item-photo > a > img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+/* Card body (name + price + badges) must never be clipped. */
+.migrated-live-content .product-item-details,
+.migrated-live-content .product-item-name,
+.migrated-live-content .product-item .price-box,
+.migrated-live-content .product-item .price {
+  overflow: visible !important;
+  max-height: none !important;
+  -webkit-line-clamp: unset !important;
+  text-overflow: clip !important;
+  white-space: normal !important;
+}
+
 /* ---- Equal-height cards in Magento Page Builder column groups ---------
-   The original uses `display:flex` on the row with each column as a flex
-   child, so cards stretch to the tallest sibling.  Without the original
-   layout JS we enforce that with plain CSS.  We also unlock any
-   max-height / line-clamp that would crop text at three lines. */
-.migrated-live-content [data-content-type="row"],
+   The column-group is the flex container; each column is a flex child, so
+   cards stretch to the tallest sibling. Without the original layout JS we
+   enforce that with plain CSS.  We also unlock any max-height / line-clamp
+   that would crop text at three lines.
+   NOTE: we deliberately do NOT force `display:flex` on [data-content-type="row"]
+   because rows typically stack multiple column-groups vertically (e.g. one
+   row containing one column-group per category: 睡房, 客廳). Flexing the row
+   horizontally would squash those column-groups onto the same line. */
 .migrated-live-content [data-content-type="column-group"],
 .migrated-live-content .pagebuilder-column-group,
 .migrated-live-content .pagebuilder-column-line {
   display: flex !important;
   flex-wrap: wrap;
   align-items: stretch !important;
+  width: 100%;
+  box-sizing: border-box;
 }
 .migrated-live-content [data-content-type="column"],
 .migrated-live-content .pagebuilder-column {
@@ -300,10 +380,8 @@ _CAROUSEL_CSS_FIXES = """\
   align-items: stretch !important;
   height: auto !important;
   min-height: 0;
-}
-.migrated-live-content [data-content-type="column"] > *,
-.migrated-live-content .pagebuilder-column > * {
-  flex: 0 0 auto;
+  min-width: 0;                 /* allow children (carousel) to shrink */
+  box-sizing: border-box;
 }
 /* Let every card body show all its text — Magento Page Builder's default
    stylesheet clamps text-content blocks at a fixed height via overflow:
@@ -332,6 +410,41 @@ _CAROUSEL_CSS_FIXES = """\
   white-space: normal !important;
 }
 
+/* ---- Magento Page Builder "products" widget inside a column -----------
+   The widget renders as <div data-content-type="products"> wrapping a
+   Slick slider (or a plain .products.list.items grid when Slick JS fails
+   to boot). Force both forms to fill the column so the second, third,
+   etc. carousels on the page don't shrink to their natural width. */
+.migrated-live-content [data-content-type="products"],
+.migrated-live-content .block-products-list,
+.migrated-live-content .pagebuilder-widget-product-carousel {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0;
+  box-sizing: border-box;
+  display: block;
+}
+/* Fallback grid layout if Slick never initialised on this row — keep the
+   product tiles side-by-side instead of stacking vertically. */
+.migrated-live-content .products.list.items.product-items,
+.migrated-live-content ol.product-items,
+.migrated-live-content ul.product-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  width: 100%;
+}
+.migrated-live-content .products.list.items.product-items > .product-item,
+.migrated-live-content ol.product-items > .product-item,
+.migrated-live-content ul.product-items > .product-item {
+  flex: 0 0 calc(20% - 12px);
+  max-width: calc(20% - 12px);
+  box-sizing: border-box;
+}
+
 /* ---- Mobile responsive: stack multi-column rows on small screens ------
    The original Magento Page Builder uses @media queries that turn
    multi-column rows into a vertical stack (or a Slick mobile slider) on
@@ -339,7 +452,6 @@ _CAROUSEL_CSS_FIXES = """\
    which leaves the narrow columns side-by-side and each column's text
    wraps one-character-per-line.  Force the stack explicitly. */
 @media (max-width: 767px) {
-  .migrated-live-content [data-content-type="row"],
   .migrated-live-content [data-content-type="column-group"],
   .migrated-live-content .pagebuilder-column-group,
   .migrated-live-content .pagebuilder-column-line {
@@ -351,6 +463,12 @@ _CAROUSEL_CSS_FIXES = """\
     max-width: 100% !important;
     flex-basis: auto !important;
     margin-bottom: 16px;
+  }
+  .migrated-live-content .products.list.items.product-items > .product-item,
+  .migrated-live-content ol.product-items > .product-item,
+  .migrated-live-content ul.product-items > .product-item {
+    flex: 0 0 calc(50% - 6px);
+    max-width: calc(50% - 6px);
   }
 }
 """
