@@ -623,6 +623,7 @@ class MigrationAgent:
             capture = capture_live_fragment(
                 primary_url,
                 login=self.magento_login,
+                site_base_url=self.source_base_url,
             )
             if capture.ok:
                 self.mlog.info(

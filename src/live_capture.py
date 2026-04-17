@@ -1270,6 +1270,7 @@ def capture_live_fragment(
     viewport_width: int = 1280,
     extra_wait_ms: int = 1500,
     login: dict | None = None,
+    site_base_url: str = "",
 ) -> CaptureResult:
     """
     Render the given URL and return a self-contained Builder.io-ready HTML
@@ -1287,6 +1288,12 @@ def capture_live_fragment(
         login: Optional dict with {admin_url, username, password, otp}. Only
             needed if the target URL is *not* publicly accessible. Public CMS
             pages like /hk/zh/intro-fur-tips don't need this.
+        site_base_url: Scheme+host of the source site, e.g.
+            "https://www.pricerite.com.hk". When provided, any
+            [data-content-type="products"] blocks in the captured HTML are
+            replaced with fresh product cards fetched from the site's GraphQL
+            API, eliminating the Slick carousel state issues that cause
+            cropped cards, missing prices, and layout drift on later rows.
 
     Returns:
         CaptureResult. Check `.ok` before using.
@@ -1302,7 +1309,7 @@ def capture_live_fragment(
     try:
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(
+            result = loop.run_until_complete(
                 _capture_async(
                     url=url,
                     selectors=selectors,
@@ -1317,3 +1324,21 @@ def capture_live_fragment(
     except Exception as e:
         logger.exception("capture_live_fragment failed")
         return CaptureResult(url=url, error=f"{type(e).__name__}: {e}")
+
+    # Post-process: replace Magento product widgets with clean GraphQL-fetched
+    # cards. Slick's static snapshot causes cropped images, missing prices, and
+    # layout drift on multi-row pages — bypassing it entirely is the only
+    # reliable fix.
+    if site_base_url and result.ok and result.html_fragment:
+        try:
+            from urllib.parse import urlparse
+            from .product_renderer import rewrite_product_widgets
+            parsed = urlparse(url)
+            graphql_url = f"{parsed.scheme}://{parsed.netloc}/graphql"
+            result.html_fragment = rewrite_product_widgets(
+                result.html_fragment, graphql_url, site_base_url
+            )
+        except Exception as e:
+            logger.warning("product widget rewrite skipped: %s", e)
+
+    return result
