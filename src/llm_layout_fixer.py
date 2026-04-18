@@ -30,15 +30,18 @@ import logging
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-# Default to the most capable OpenAI vision model available. Override via
-# OPENAI_MODEL for experiments. gpt-5 > gpt-4.1 > gpt-4o for layout fidelity.
-DEFAULT_MODEL = "gpt-5"
+# Most capable OpenAI vision model available via API as of April 2025.
+# Override via OPENAI_MODEL env var.  gpt-4.1 > gpt-4o for layout fidelity.
+DEFAULT_MODEL = "gpt-4.1"
 FALLBACK_MODEL = "gpt-4o"
+_RATE_LIMIT_RETRIES = 3        # max retries on 429 before giving up
+_RATE_LIMIT_INITIAL_WAIT = 5   # seconds (doubles each retry)
 DEFAULT_VIEWPORT_WIDTH = 1280
 DEFAULT_VIEWPORT_HEIGHT = 800
 
@@ -265,32 +268,44 @@ def _call_openai_vision(
 
     def _post(m: str) -> str | None:
         payload["model"] = m
-        try:
-            response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                data=json.dumps(payload),
-                timeout=300,
-            )
-            response.raise_for_status()
-            data = response.json()
-            content = (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
-            return _extract_html_from_response(content)
-        except requests.HTTPError as he:
-            # 400/404 typically means the model name isn't available for this
-            # account — fall back to the stable model instead of giving up.
-            logger.warning("OpenAI %s failed (%s) — will try fallback.", m, he)
-            return None
-        except Exception as e:
-            logger.warning("OpenAI layout-fix request failed on %s: %s", m, e)
-            return None
+        wait = _RATE_LIMIT_INITIAL_WAIT
+        for attempt in range(_RATE_LIMIT_RETRIES + 1):
+            try:
+                response = requests.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    data=json.dumps(payload),
+                    timeout=300,
+                )
+                response.raise_for_status()
+                data = response.json()
+                content = (
+                    data.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+                return _extract_html_from_response(content)
+            except requests.HTTPError as he:
+                status = he.response.status_code if he.response is not None else None
+                if status == 429 and attempt < _RATE_LIMIT_RETRIES:
+                    logger.warning(
+                        "OpenAI %s rate-limited (429) — retrying in %ds "
+                        "(attempt %d/%d)",
+                        m, wait, attempt + 1, _RATE_LIMIT_RETRIES,
+                    )
+                    time.sleep(wait)
+                    wait *= 2
+                    continue
+                # 400/404 = model not available; other errors → fall through
+                logger.warning("OpenAI %s failed (%s) — will try fallback.", m, he)
+                return None
+            except Exception as e:
+                logger.warning("OpenAI layout-fix request failed on %s: %s", m, e)
+                return None
+        return None
 
     out = _post(model)
     if out:
