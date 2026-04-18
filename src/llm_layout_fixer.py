@@ -35,7 +35,10 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_MODEL = "gpt-4o"
+# Default to the most capable OpenAI vision model available. Override via
+# OPENAI_MODEL for experiments. gpt-5 > gpt-4.1 > gpt-4o for layout fidelity.
+DEFAULT_MODEL = "gpt-5"
+FALLBACK_MODEL = "gpt-4o"
 DEFAULT_VIEWPORT_WIDTH = 1280
 DEFAULT_VIEWPORT_HEIGHT = 800
 
@@ -210,13 +213,18 @@ def _call_openai_vision(
         "code block. No prose, no explanation.\n"
         "2. Preserve every <img>, link, heading, table, and piece of text. "
         "Do NOT drop content.\n"
-        "3. Fix layout issues with inline styles. Common fixes: restore "
-        "flex/grid column widths, remove stray position:sticky/fixed, center "
-        "rows with margin:0 auto, set explicit width:100% on containers, "
-        "ensure column-groups render side-by-side.\n"
-        "4. Do not add <script>, <iframe>, <style>, or external stylesheet "
-        "links — the target container strips them.\n"
-        "5. Keep all data-* attributes (Builder.io and Page Builder rely "
+        "3. Fix layout issues with inline styles AND <style> rules. Common "
+        "fixes: restore flex/grid column widths, remove stray "
+        "position:sticky/fixed, center rows with margin:0 auto, set explicit "
+        "width:100% on containers, ensure column-groups render side-by-side, "
+        "restore carousels/sliders with basic horizontal scroll fallback.\n"
+        "4. PRESERVE <iframe> embeds from YouTube/Vimeo exactly as given — "
+        "they are the video players the original page uses. Wrap each in "
+        "a responsive 16:9 container (padding-bottom:56.25%).\n"
+        "5. You MAY include <style> blocks for hover/@media/keyframe rules "
+        "that can't be inlined. Do NOT add <script> tags or external "
+        "stylesheet links — the target container blocks them.\n"
+        "6. Keep all data-* attributes (Builder.io and Page Builder rely "
         "on them)."
     )
 
@@ -255,37 +263,61 @@ def _call_openai_vision(
         ],
     }
 
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            data=json.dumps(payload),
-            timeout=180,
-        )
-        response.raise_for_status()
-        data = response.json()
-        content = (
-            data.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-        )
-        return _extract_html_from_response(content)
-    except Exception as e:
-        logger.warning("OpenAI layout-fix request failed: %s", e)
-        return None
+    def _post(m: str) -> str | None:
+        payload["model"] = m
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                data=json.dumps(payload),
+                timeout=300,
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+            )
+            return _extract_html_from_response(content)
+        except requests.HTTPError as he:
+            # 400/404 typically means the model name isn't available for this
+            # account — fall back to the stable model instead of giving up.
+            logger.warning("OpenAI %s failed (%s) — will try fallback.", m, he)
+            return None
+        except Exception as e:
+            logger.warning("OpenAI layout-fix request failed on %s: %s", m, e)
+            return None
+
+    out = _post(model)
+    if out:
+        return out
+    if model != FALLBACK_MODEL:
+        logger.info("Retrying LLM layout fix with fallback model %s", FALLBACK_MODEL)
+        return _post(FALLBACK_MODEL)
+    return None
+
+
+_VIDEO_IFRAME_RE = re.compile(
+    r"<iframe[^>]+src\s*=\s*['\"][^'\"]*"
+    r"(?:youtube\.com|youtube-nocookie\.com|youtu\.be|vimeo\.com|"
+    r"player\.vimeo\.com|bilibili\.com|dailymotion\.com|wistia\.(?:com|net))",
+    re.IGNORECASE,
+)
 
 
 def _validate_fix(original_html: str, fixed_html: str) -> bool:
     """Sanity check the LLM response before accepting it.
 
-    We require that:
-    - It actually parses as HTML.
-    - It has at least 40% of the character length of the input (so we don't
-      accept an answer that silently dropped the body).
-    - It doesn't introduce <script> or <iframe> tags.
+    Requirements:
+    - Parses as HTML.
+    - ≥ 40 % of the input length (so the model didn't silently drop the body).
+    - No <script> tags.
+    - iframes, if present, must point at a known video embed host. Any other
+      iframe (chat widgets, trackers) is rejected.
     """
     if not fixed_html or len(fixed_html) < max(200, int(len(original_html) * 0.4)):
         logger.warning("LLM fix rejected: output too short (%d vs %d input)",
@@ -293,9 +325,24 @@ def _validate_fix(original_html: str, fixed_html: str) -> bool:
         return False
 
     low = fixed_html.lower()
-    if "<script" in low or "<iframe" in low:
-        logger.warning("LLM fix rejected: introduced <script>/<iframe>.")
+    if "<script" in low:
+        logger.warning("LLM fix rejected: introduced <script>.")
         return False
+
+    # Walk every iframe in the output and reject the whole fix if any is not
+    # a whitelisted video embed.
+    if "<iframe" in low:
+        try:
+            from bs4 import BeautifulSoup as _BS
+            _soup = _BS(fixed_html, "html.parser")
+            for ifr in _soup.find_all("iframe"):
+                src = (ifr.get("src") or "").strip()
+                if not src or not _VIDEO_IFRAME_RE.search(f'<iframe src="{src}">'):
+                    logger.warning("LLM fix rejected: non-video iframe src=%r", src)
+                    return False
+        except Exception as e:
+            logger.warning("LLM fix rejected: iframe check failed (%s)", e)
+            return False
 
     try:
         from bs4 import BeautifulSoup
@@ -416,3 +463,88 @@ def fix_layout(
     except Exception as e:
         logger.warning("LLM layout fix skipped due to error: %s", e)
         return current_html
+
+
+# ---------------------------------------------------------------------------
+# Manual refinement entry point
+# ---------------------------------------------------------------------------
+def refine_layout_with_screenshots(
+    original_url: str,
+    current_html: str,
+    url_key: str = "",
+    model: str | None = None,
+) -> dict:
+    """Force-run the LLM fixer and return structured diagnostics.
+
+    This is the hook used by the Streamlit "Refine with AI" button. It
+    differs from `fix_layout`:
+      - It runs even if the HTML was already marked `_html_already_processed`
+        (the caller explicitly asked for the fix).
+      - It returns a dict so the UI can show exactly what happened
+        (screenshots captured? LLM call made? validation passed?).
+    """
+    out = {
+        "original_url": original_url,
+        "html": current_html,
+        "changed": False,
+        "error": "",
+        "model": model or os.environ.get("OPENAI_MODEL", DEFAULT_MODEL),
+        "original_screenshot": "",
+        "preview_screenshot": "",
+    }
+
+    if not is_enabled():
+        out["error"] = "LLM layout fixer disabled (set OPENAI_API_KEY)."
+        return out
+    if not _check_playwright():
+        out["error"] = "Playwright not installed — cannot take screenshots."
+        return out
+    if not current_html or not original_url:
+        out["error"] = "Missing current_html or original_url."
+        return out
+
+    async def _run() -> None:
+        work_dir = Path(tempfile.mkdtemp(prefix="llm_refine_"))
+        original_png = str(work_dir / f"{url_key or 'page'}_original.png")
+        preview_png = str(work_dir / f"{url_key or 'page'}_preview.png")
+        ok_orig = await _screenshot_url(original_url, original_png)
+        if not ok_orig:
+            out["error"] = "Failed to screenshot the original page."
+            return
+        out["original_screenshot"] = original_png
+        ok_prev = await _screenshot_html(current_html, preview_png)
+        if not ok_prev:
+            out["error"] = "Failed to render the preview HTML for screenshot."
+            return
+        out["preview_screenshot"] = preview_png
+        fixed = _call_openai_vision(
+            original_png=original_png,
+            preview_png=preview_png,
+            current_html=current_html,
+            model=out["model"],
+        )
+        if not fixed:
+            out["error"] = "Model returned no usable HTML (see logs)."
+            return
+        if not _validate_fix(current_html, fixed):
+            out["error"] = "LLM output rejected by validator (see logs)."
+            return
+        out["html"] = fixed
+        out["changed"] = True
+
+    try:
+        asyncio.run(_run())
+    except RuntimeError:
+        import threading
+        def _worker() -> None:
+            try:
+                asyncio.run(_run())
+            except Exception as e:
+                out["error"] = f"{type(e).__name__}: {e}"
+        th = threading.Thread(target=_worker, daemon=True)
+        th.start()
+        th.join(timeout=480)
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+
+    return out

@@ -538,8 +538,10 @@ _CAPTURE_SCRIPT = r"""
   const clone = root.cloneNode(true);
 
   // -------- Strip chrome inside the clone (headers/footers/nav/scripts) --------
+  // NOTE: iframes are NOT in the generic strip list — we preserve iframe
+  // embeds for YouTube/Vimeo/etc. Unknown iframes are stripped below.
   const STRIP = [
-    "script","noscript","iframe","link","meta",
+    "script","noscript","link","meta",
     "header",".header",".page-header",".pwa-header",
     "footer",".footer",".page-footer",".pwa-footer",
     "nav",".nav",".navigation",".vertical-menu",
@@ -555,6 +557,56 @@ _CAPTURE_SCRIPT = r"""
   for (const sel of STRIP) {
     clone.querySelectorAll(sel).forEach(n => n.remove());
   }
+
+  // -------- Preserve video embed iframes, drop everything else --------
+  // Magento CMS pages embed YouTube (and sometimes Vimeo) via <iframe>.
+  // We keep those so the migrated page shows the video, but we drop any
+  // other iframe (chat widgets, analytics beacons, etc.) to avoid leaking
+  // unrelated external content into Builder.io.
+  var VIDEO_HOST_RE = /(^|\.)((?:youtube\.com)|(?:youtube-nocookie\.com)|(?:youtu\.be)|(?:vimeo\.com)|(?:player\.vimeo\.com)|(?:bilibili\.com)|(?:dailymotion\.com)|(?:wistia\.com)|(?:wistia\.net))$/i;
+  function looksLikeVideoEmbed(iframe) {
+    var src = iframe.getAttribute('src') || iframe.getAttribute('data-src') || '';
+    if (!src) return false;
+    try {
+      var u = new URL(src, window.location.href);
+      return VIDEO_HOST_RE.test(u.hostname.toLowerCase());
+    } catch (e) { return false; }
+  }
+  clone.querySelectorAll('iframe').forEach(function(ifr) {
+    if (looksLikeVideoEmbed(ifr)) {
+      // Ensure the src resolves absolutely (was already absolute in live DOM).
+      var rawSrc = ifr.getAttribute('src') || ifr.getAttribute('data-src') || '';
+      if (rawSrc && /^\/\//.test(rawSrc)) {
+        ifr.setAttribute('src', 'https:' + rawSrc);
+      } else if (rawSrc) {
+        try { ifr.setAttribute('src', new URL(rawSrc, window.location.href).toString()); }
+        catch (e) {}
+      }
+      // Best-practice embed attributes so the video renders inside Builder.io.
+      ifr.setAttribute('loading', 'lazy');
+      ifr.setAttribute('allowfullscreen', '');
+      if (!ifr.getAttribute('allow')) {
+        ifr.setAttribute('allow',
+          'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share');
+      }
+      if (!ifr.getAttribute('frameborder')) ifr.setAttribute('frameborder', '0');
+      // Wrap in a responsive container so the iframe doesn't collapse.
+      var parent = ifr.parentNode;
+      if (parent && !parent.classList.contains('pr-embed-video')) {
+        var wrapper = document.createElement('div');
+        wrapper.className = 'pr-embed-video';
+        wrapper.style.cssText =
+          'position:relative; width:100%; padding-bottom:56.25%;' +
+          ' height:0; overflow:hidden; margin:16px 0;';
+        parent.insertBefore(wrapper, ifr);
+        wrapper.appendChild(ifr);
+        ifr.style.cssText =
+          'position:absolute; top:0; left:0; width:100%; height:100%; border:0;';
+      }
+    } else {
+      ifr.parentNode && ifr.parentNode.removeChild(ifr);
+    }
+  });
   // Remove HTML comments
   const walker = document.createTreeWalker(clone, NodeFilter.SHOW_COMMENT);
   const comments = [];

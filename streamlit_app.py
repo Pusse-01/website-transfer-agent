@@ -36,6 +36,10 @@ from src.excel_writer import export_blog_results
 from src.migration_agent import MigrationAgent
 from src.state_persistence import save_run, load_run, load_latest_run, list_runs
 from src.live_capture import capture_live_fragment, is_available as live_capture_available
+from src.llm_layout_fixer import (
+    is_enabled as llm_fix_enabled,
+    refine_layout_with_screenshots,
+)
 
 load_dotenv()
 
@@ -64,6 +68,10 @@ DEFAULTS = {
     "pipeline_running": False,
     "pipeline_log": [],
     "current_run_id": None,
+    # Batch-preview selections (indices into `loaded_pages`)
+    "batch_scrape_selection": [],
+    # Keys in `scraped_posts` marked for batch publish
+    "batch_publish_selection": [],
 }
 
 for key, default in DEFAULTS.items():
@@ -252,10 +260,14 @@ def builder_entry_to_preview_data(entry: dict) -> dict:
 st.title("Website Transfer Agent")
 st.caption("Migrate blog posts and static pages from Magento to Builder.io")
 
-tab_input, tab_preview, tab_pipeline, tab_builder, tab_results, tab_logs = st.tabs(
-    ["1. Upload Excel", "2. Preview Pages", "3. Run Migration",
-     "4. Builder.io Browser", "5. Results & Export", "6. Logs"]
-)
+(
+    tab_input, tab_preview, tab_pipeline, tab_rerun,
+    tab_builder, tab_results, tab_logs,
+) = st.tabs([
+    "1. Upload Excel", "2. Preview Pages", "3. Run Migration",
+    "4. Rerun Specific URLs",
+    "5. Builder.io Browser", "6. Results & Export", "7. Logs",
+])
 
 # ========================== TAB 1: UPLOAD EXCEL ==========================
 with tab_input:
@@ -507,6 +519,121 @@ with tab_preview:
                     if not captured_live:
                         st.success(f"Scraped (legacy): {post_data.get('title', url_key)}")
 
+        # ------------------------------------------------------------------
+        # BATCH scrape: pick several pages at once
+        # ------------------------------------------------------------------
+        if pages:
+            st.divider()
+            with st.expander("Batch scrape multiple pages", expanded=False):
+                st.caption(
+                    "Select any number of pages, click **Scrape Selected**, and each "
+                    "one will be captured and added to the preview list below. "
+                    "Use this to queue up a set of troubled pages and review them "
+                    "together before publishing."
+                )
+
+                batch_options = list(range(len(pages)))
+                st.session_state.batch_scrape_selection = [
+                    idx for idx in st.session_state.get("batch_scrape_selection", [])
+                    if idx in batch_options
+                ]
+                picked = st.multiselect(
+                    "Pages to scrape",
+                    options=batch_options,
+                    default=st.session_state.batch_scrape_selection,
+                    format_func=lambda i: page_labels[i],
+                    key="batch_scrape_multiselect",
+                )
+                st.session_state.batch_scrape_selection = picked
+
+                col_bs1, col_bs2 = st.columns([1, 3])
+                with col_bs1:
+                    run_batch_scrape = st.button(
+                        "Scrape Selected",
+                        type="primary",
+                        disabled=not picked,
+                        width="stretch",
+                    )
+                with col_bs2:
+                    st.caption(f"{len(picked)} page(s) selected")
+
+                if run_batch_scrape and picked:
+                    login = None
+                    if magento_username and magento_password:
+                        login = {
+                            "admin_url": magento_admin_url,
+                            "username": magento_username,
+                            "password": magento_password,
+                            "otp": magento_otp or "",
+                        }
+
+                    batch_progress = st.progress(0.0)
+                    batch_status = st.empty()
+                    scraped_ok = 0
+                    scraped_fail = 0
+                    for count, idx in enumerate(picked, start=1):
+                        p = pages[idx]
+                        url_key_b = p.get("url_key", "")
+                        page_type_b = p.get("page_type", "blog")
+                        primary_url_b = p.get("primary_url", "")
+                        if not primary_url_b:
+                            if page_type_b == "blog":
+                                primary_url_b = f"{source_url.rstrip('/')}{blog_path}{url_key_b}"
+                            else:
+                                primary_url_b = f"{source_url.rstrip('/')}/{url_key_b}"
+
+                        batch_status.markdown(
+                            f"**[{count}/{len(picked)}]** Scraping `{url_key_b}`..."
+                        )
+
+                        post_data_b = None
+                        if use_live_capture and primary_url_b:
+                            try:
+                                cap = capture_live_fragment(primary_url_b, login=login)
+                                if cap.ok:
+                                    post_data_b = {
+                                        "title": cap.title,
+                                        "html_content": cap.html_fragment,
+                                        "thumbnail": cap.og_image,
+                                        "og_image": cap.og_image,
+                                        "meta_title": cap.meta_title,
+                                        "meta_description": cap.meta_description,
+                                        "url_key": url_key_b,
+                                        "primary_url": primary_url_b,
+                                        "images": cap.images,
+                                        "source": "live_capture",
+                                        "page_type": page_type_b,
+                                        "_html_already_processed": True,
+                                    }
+                            except Exception as e:
+                                st.warning(f"Live capture failed for {url_key_b}: {e}")
+
+                        if not post_data_b:
+                            try:
+                                if page_type_b == "blog":
+                                    scraper = BlogScraper(source_url, blog_path)
+                                    post_data_b = scraper.fetch_post_by_url_key(url_key_b)
+                                else:
+                                    scraper = StaticPageScraper(source_url)
+                                    post_data_b = scraper.fetch_page_by_url(primary_url_b, url_key_b)
+                                if post_data_b:
+                                    post_data_b.setdefault("primary_url", primary_url_b)
+                            except Exception as e:
+                                st.error(f"{url_key_b} failed: {e}")
+
+                        if post_data_b and post_data_b.get("html_content"):
+                            st.session_state.scraped_posts[url_key_b] = post_data_b
+                            scraped_ok += 1
+                        else:
+                            scraped_fail += 1
+
+                        batch_progress.progress(count / len(picked))
+
+                    batch_status.markdown(
+                        f"Batch scrape done — **{scraped_ok}** succeeded, "
+                        f"**{scraped_fail}** failed."
+                    )
+
         # Show preview of scraped content
         if st.session_state.scraped_posts:
             st.divider()
@@ -671,6 +798,210 @@ with tab_preview:
                                     st.code(details, language="json")
                         except Exception as e:
                             st.error(f"Exception during publish: {e}")
+
+            # --------------------------------------------------------------
+            # Refine layout with AI (screenshot-driven)
+            # --------------------------------------------------------------
+            # When the preview still doesn't match the original live page
+            # (sliders collapse, columns stack, etc.), send a full-page
+            # screenshot of the original and the current preview to the
+            # configured vision model and let it rewrite the HTML. The
+            # result is stored back in st.session_state.scraped_posts so
+            # the preview above updates on the next rerun.
+            st.divider()
+            st.markdown("### Refine Layout with AI")
+            st.caption(
+                "If the preview above still doesn't match the original live "
+                "page, click below to screenshot both and let the vision "
+                "model rewrite the HTML to match. The refined HTML replaces "
+                "the current preview so you can re-check before publishing."
+            )
+
+            if not llm_fix_enabled():
+                st.info(
+                    "Set `OPENAI_API_KEY` (and optionally `OPENAI_MODEL`) in "
+                    "your environment to enable AI-driven layout refinement."
+                )
+            else:
+                refine_col_a, refine_col_b = st.columns([1, 3])
+                with refine_col_a:
+                    refine_clicked = st.button(
+                        "Refine with AI",
+                        type="primary",
+                        key=f"refine_ai_{preview_key}",
+                        width="stretch",
+                    )
+                with refine_col_b:
+                    st.caption(
+                        "Uses full-page screenshots of the source and the "
+                        f"current preview. Model: `{os.getenv('OPENAI_MODEL', 'gpt-5')}`."
+                    )
+
+                if refine_clicked:
+                    primary_url_r = (
+                        post_data.get("primary_url")
+                        or (f"{source_url.rstrip('/')}{blog_path}{preview_key}"
+                            if post_data.get("page_type") == "blog"
+                            else f"{source_url.rstrip('/')}/{preview_key}")
+                    )
+                    with st.spinner("Screenshotting and asking the model..."):
+                        refine_result = refine_layout_with_screenshots(
+                            original_url=primary_url_r,
+                            current_html=post_data.get("html_content", ""),
+                            url_key=preview_key,
+                        )
+
+                    if refine_result.get("changed"):
+                        post_data["html_content"] = refine_result["html"]
+                        # Mark as final so the upload path doesn't re-run the
+                        # CSS processor on top of the model's output.
+                        post_data["_html_already_processed"] = True
+                        st.session_state.scraped_posts[preview_key] = post_data
+                        st.success(
+                            f"AI refinement applied (model: `{refine_result.get('model', '?')}`). "
+                            "The preview above will refresh on the next rerun."
+                        )
+                        st.rerun()
+                    else:
+                        err = refine_result.get("error") or "No changes returned."
+                        st.warning(f"AI refinement did not apply: {err}")
+
+        # ------------------------------------------------------------------
+        # BATCH migrate & publish: pick from the already-scraped previews
+        # ------------------------------------------------------------------
+        if st.session_state.scraped_posts:
+            st.divider()
+            with st.expander("Batch migrate & publish scraped pages", expanded=False):
+                st.caption(
+                    "Pick the pages you've already previewed above and publish "
+                    "them as a single batch. For each page, any existing "
+                    "Builder.io entry with the same URL key is deleted and "
+                    "replaced with the fresh capture."
+                )
+
+                if not builder_private_key or builder_private_key == "your_builder_private_api_key_here":
+                    st.info(
+                        "Enter your Builder.io **Private API Key** in the "
+                        "sidebar to enable batch publishing."
+                    )
+                else:
+                    scraped_keys = list(st.session_state.scraped_posts.keys())
+                    st.session_state.batch_publish_selection = [
+                        k for k in st.session_state.batch_publish_selection
+                        if k in scraped_keys
+                    ]
+
+                    sel = st.multiselect(
+                        "Pages to publish",
+                        options=scraped_keys,
+                        default=st.session_state.batch_publish_selection or scraped_keys,
+                        format_func=lambda k: (
+                            f"{st.session_state.scraped_posts[k].get('title', k)}"
+                            f" ({k})"
+                        ),
+                        key="batch_publish_multiselect",
+                    )
+                    st.session_state.batch_publish_selection = sel
+
+                    col_bp1, col_bp2 = st.columns([1, 3])
+                    with col_bp1:
+                        run_batch_publish = st.button(
+                            "Publish Selected",
+                            type="primary",
+                            disabled=not sel,
+                            key="run_batch_publish_btn",
+                            width="stretch",
+                        )
+                    with col_bp2:
+                        st.caption(f"{len(sel)} page(s) selected")
+
+                    if run_batch_publish and sel:
+                        pub_progress = st.progress(0.0)
+                        pub_status = st.empty()
+                        pub_ok = 0
+                        pub_fail = 0
+
+                        img_handler = ImageHandler(builder_api_key=builder_private_key)
+                        pub_client = BuilderClient(
+                            api_key=builder_private_key,
+                            model_name=builder_blog_model,
+                            blog_model=builder_blog_model,
+                            page_model=builder_page_model,
+                            public_key=builder_public_key,
+                        )
+
+                        for n, key in enumerate(sel, start=1):
+                            page_data_b = dict(st.session_state.scraped_posts[key])
+                            page_type_b = page_data_b.get("page_type", "blog")
+                            model = (
+                                pub_client.blog_model
+                                if page_type_b == "blog"
+                                else pub_client.page_model
+                            )
+                            pub_status.markdown(
+                                f"**[{n}/{len(sel)}]** Publishing `{key}` "
+                                f"({page_type_b})..."
+                            )
+
+                            try:
+                                existing = pub_client.check_entry_exists(
+                                    page_data_b.get("url_key", ""),
+                                    model_override=model,
+                                )
+                                if existing and existing.get("id"):
+                                    pub_client.delete_entry(
+                                        existing["id"], model_override=model
+                                    )
+
+                                try:
+                                    new_html, _ = img_handler.process_images_in_html(
+                                        page_data_b["html_content"],
+                                        base_url=source_url,
+                                    )
+                                    page_data_b["html_content"] = new_html
+                                except Exception as e:
+                                    st.warning(
+                                        f"Image upload partial failure for {key}: {e}"
+                                    )
+                                try:
+                                    page_data_b["html_content"] = (
+                                        img_handler.rewrite_internal_links(
+                                            page_data_b["html_content"],
+                                            source_base_url=source_url,
+                                        )
+                                    )
+                                except Exception:
+                                    pass
+                                if page_data_b.get("thumbnail"):
+                                    try:
+                                        thumb = img_handler.process_thumbnail(
+                                            page_data_b["thumbnail"]
+                                        )
+                                        if thumb:
+                                            page_data_b["thumbnail"] = thumb
+                                    except Exception:
+                                        pass
+
+                                api_res = pub_client.create_entry(
+                                    page_data_b, page_type=page_type_b, publish=True,
+                                )
+                                if api_res.get("success"):
+                                    pub_ok += 1
+                                else:
+                                    pub_fail += 1
+                                    st.error(
+                                        f"{key}: {api_res.get('error', 'unknown')}"
+                                    )
+                            except Exception as e:
+                                pub_fail += 1
+                                st.error(f"{key}: {e}")
+
+                            pub_progress.progress(n / len(sel))
+
+                        pub_status.markdown(
+                            f"Batch publish done — **{pub_ok}** succeeded, "
+                            f"**{pub_fail}** failed."
+                        )
 
 
 # ========================== TAB 3: RUN MIGRATION ==========================
@@ -877,7 +1208,235 @@ with tab_pipeline:
             cols[4].metric("Needs Review", r.get("needs_review", 0))
 
 
-# ========================== TAB 4: BUILDER.IO BROWSER ==========================
+# ========================== TAB 4: RERUN SPECIFIC URLS =========================
+with tab_rerun:
+    st.subheader("Rerun Migration for Specific URLs")
+    st.caption(
+        "Paste one source URL (or URL key) per line and rerun the full "
+        "migration pipeline on just that set. Useful for retrying pages that "
+        "came out broken — sliders, YouTube embeds, collapsed layouts — "
+        "without re-migrating everything. Existing Builder.io entries for "
+        "these URL keys are replaced with the fresh capture."
+    )
+
+    url_input_default = "\n".join([
+        "https://www.pricerite.com.hk/hk/zh/corporate-order",
+        "https://www.pricerite.com.hk/hk/zh/warranty",
+        "https://www.pricerite.com.hk/hk/zh/service-charge",
+        "https://www.pricerite.com.hk/hk/zh/corp-news",
+        "https://www.pricerite.com.hk/hk/zh/corporate_culture",
+        "https://www.pricerite.com.hk/hk/zh/awards",
+        "https://www.pricerite.com.hk/mattress-eform",
+        "https://www.pricerite.com.hk/hk/zh/customer-service-center",
+        "https://www.pricerite.com.hk/hk/zh/mattress",
+        "https://www.pricerite.com.hk/hk/zh/bed",
+        "https://www.pricerite.com.hk/hk/zh/violino_collection",
+        "https://www.pricerite.com.hk/hk/zh/staple_series",
+        "https://www.pricerite.com.hk/hk/zh/mesh2.0",
+        "https://www.pricerite.com.hk/hk/zh/mesh",
+        "https://www.pricerite.com.hk/hk/zh/cmf",
+        "https://www.pricerite.com.hk/hk/zh/econ_choices",
+        "https://www.pricerite.com.hk/hk/zh/eshop_exclusive",
+        "https://www.pricerite.com.hk/mo/delivery-arrangement",
+        "https://www.pricerite.com.hk/hk/zh/home-food",
+        "https://www.pricerite.com.hk/hk/zh/housingoffer2026",
+        "https://www.pricerite.com.hk/hk/zh/futip_estate",
+        "https://www.pricerite.com.hk/hk/zh/partitionfur",
+        "https://www.pricerite.com.hk/hk/zh/tools",
+        "https://www.pricerite.com.hk/hk/zh/intro-refrigerator-tips",
+        "https://www.pricerite.com.hk/hk/zh/intro-television-tips",
+        "https://www.pricerite.com.hk/hk/zh/intro-washingmachine-tips",
+        "https://www.pricerite.com.hk/hk/zh/intro-fur-tips",
+        "https://www.pricerite.com.hk/hk/zh/intro-water-heater-tips",
+        "https://www.pricerite.com.hk/hk/zh/intro-aircon-tips",
+        "https://www.pricerite.com.hk/hk/zh/intro-guide-double-bed-size",
+        "https://www.pricerite.com.hk/hk/zh/intro-guide-single-bed-size",
+        "https://www.pricerite.com.hk/hk/zh/intro-mattress-tips",
+    ])
+
+    rerun_urls_raw = st.text_area(
+        "URLs or URL keys (one per line)",
+        value=st.session_state.get("rerun_urls_raw", url_input_default),
+        height=260,
+        key="rerun_urls_raw",
+    )
+
+    col_rr1, col_rr2, col_rr3 = st.columns(3)
+    with col_rr1:
+        rerun_page_type = st.radio(
+            "Page model",
+            ["static", "blog"],
+            horizontal=True,
+            help="Most trouble pages are static CMS pages (`/foo`), not blog posts (`/blog/foo`).",
+        )
+    with col_rr2:
+        rerun_publish = st.checkbox("Publish immediately", value=True)
+    with col_rr3:
+        rerun_skip_existing = st.checkbox(
+            "Skip if already present",
+            value=False,
+            help="Leave unchecked to REPLACE existing entries with the fresh capture.",
+        )
+
+    def _parse_rerun_lines(raw: str) -> list[dict]:
+        """Turn each non-empty line into {url_key, primary_url}.
+
+        Accepts full URLs (https://.../foo) or bare url keys (foo / hk/zh/foo).
+        """
+        out = []
+        base = source_url.rstrip("/")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("http://") or line.startswith("https://"):
+                primary = line
+                # Derive url_key from the last path segment for extension-free
+                # Builder.io paths, matching _normalize_url_key semantics.
+                from urllib.parse import urlparse
+                parsed = urlparse(line)
+                path = (parsed.path or "/").rstrip("/")
+                if not path or path == "/":
+                    continue
+                url_key = path.rsplit("/", 1)[-1]
+                if url_key.lower().endswith(".html"):
+                    url_key = url_key[: -len(".html")]
+            else:
+                url_key = line.strip("/")
+                if url_key.lower().endswith(".html"):
+                    url_key = url_key[: -len(".html")]
+                # Most rerun URLs are static pages at /hk/zh/<key>.
+                primary = f"{base}/hk/zh/{url_key}"
+            out.append({"url_key": url_key, "primary_url": primary})
+        return out
+
+    parsed_targets = _parse_rerun_lines(rerun_urls_raw)
+    st.markdown(f"**{len(parsed_targets)}** target page(s) will be processed.")
+
+    if (not builder_private_key) or builder_private_key == "your_builder_private_api_key_here":
+        st.warning(
+            "Enter your Builder.io **Private API Key** in the sidebar to "
+            "enable the rerun pipeline."
+        )
+        rerun_disabled = True
+    else:
+        rerun_disabled = False
+
+    run_clicked = st.button(
+        "Rerun migration on these URLs",
+        type="primary",
+        disabled=rerun_disabled or not parsed_targets,
+        key="rerun_targets_btn",
+    )
+
+    if run_clicked and parsed_targets:
+        _login = None
+        if magento_username and magento_password:
+            _login = {
+                "admin_url": magento_admin_url,
+                "username": magento_username,
+                "password": magento_password,
+                "otp": magento_otp or "",
+            }
+
+        rr_agent = MigrationAgent(
+            source_base_url=source_url,
+            builder_api_key=builder_private_key,
+            builder_model=(
+                builder_blog_model if rerun_page_type == "blog" else builder_page_model
+            ),
+            blog_model=builder_blog_model,
+            page_model=builder_page_model,
+            blog_path=blog_path,
+            builder_public_key=builder_public_key,
+            use_live_capture=use_live_capture,
+            magento_login=_login,
+        )
+
+        rr_progress = st.progress(0.0)
+        rr_status = st.empty()
+        rr_log = st.container()
+        rr_agent.results["started_at"] = datetime.now().isoformat()
+        rr_agent.results["total"] = len(parsed_targets)
+
+        for idx, target in enumerate(parsed_targets, 1):
+            url_key = target["url_key"]
+            primary = target["primary_url"]
+            rr_status.markdown(f"**[{idx}/{len(parsed_targets)}]** `{url_key}` — {primary}")
+
+            result = rr_agent._migrate_single_page(
+                url_key=url_key,
+                page_type=rerun_page_type,
+                primary_url=primary,
+                publish=rerun_publish,
+                skip_existing=rerun_skip_existing,
+                dry_run=False,
+            )
+            result["original_data"] = {"url_key": url_key, "primary_url": primary}
+            result["page_type"] = rerun_page_type
+            rr_agent.results["details"].append(result)
+
+            if result["status"] == "published_by_agent":
+                rr_agent.results["success"] += 1
+                with rr_log:
+                    st.success(f"[{idx}/{len(parsed_targets)}] {url_key} — Published")
+            elif result["status"] == "skipped":
+                rr_agent.results["skipped"] += 1
+                with rr_log:
+                    st.info(f"[{idx}/{len(parsed_targets)}] {url_key} — Skipped (exists)")
+            elif result["status"] == "needs_human_review":
+                rr_agent.results["needs_review"] += 1
+                with rr_log:
+                    st.warning(f"[{idx}/{len(parsed_targets)}] {url_key} — Needs review")
+            else:
+                rr_agent.results["failed"] += 1
+                with rr_log:
+                    st.error(
+                        f"[{idx}/{len(parsed_targets)}] {url_key} — "
+                        f"Failed: {str(result.get('error', ''))[:120]}"
+                    )
+
+            rr_progress.progress(idx / len(parsed_targets))
+
+        rr_agent.results["completed_at"] = datetime.now().isoformat()
+        rr_status.markdown("**Rerun complete!**")
+
+        # Make the rerun feel like any other migration — persist results and
+        # show them under "Results & Export" / "Logs" too.
+        st.session_state.migration_results = rr_agent.results
+        st.session_state.pipeline_log = rr_agent.get_log_entries()
+
+        try:
+            excel_path = export_blog_results(rr_agent.results)
+            if excel_path:
+                st.session_state["results_excel_path"] = excel_path
+        except Exception as e:
+            st.warning(f"Failed to export Excel: {e}")
+        try:
+            log_path = rr_agent.export_log()
+            st.session_state["log_file_path"] = log_path
+        except Exception:
+            pass
+        try:
+            save_run(
+                run_id=rr_agent.mlog.run_id,
+                migration_results=rr_agent.results,
+                pipeline_log=rr_agent.get_log_entries(),
+                results_excel_path=st.session_state.get("results_excel_path", ""),
+                log_file_path=st.session_state.get("log_file_path", ""),
+            )
+            st.session_state.current_run_id = rr_agent.mlog.run_id
+        except Exception as e:
+            st.warning(f"Could not persist run state: {e}")
+
+        cols = st.columns(4)
+        cols[0].metric("Published", rr_agent.results["success"])
+        cols[1].metric("Failed", rr_agent.results["failed"])
+        cols[2].metric("Skipped", rr_agent.results["skipped"])
+        cols[3].metric("Needs Review", rr_agent.results["needs_review"])
+
+
+# ========================== TAB 5: BUILDER.IO BROWSER ==========================
 with tab_builder:
     st.subheader("Builder.io Content Browser")
 

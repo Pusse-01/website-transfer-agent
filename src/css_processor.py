@@ -128,11 +128,13 @@ mark { padding: 2px 4px; }
 }
 """
 
-# Elements that should be completely removed from migrated content
+# Elements that should be completely removed from migrated content.
+# NOTE: <iframe> is NOT blanket-stripped here — video embeds (YouTube,
+# Vimeo, etc.) are preserved via `_preserve_video_iframes` before
+# sanitization and then re-inserted.  See process_html_for_builder.
 UNWANTED_SELECTORS = [
     "script",
     "noscript",
-    "iframe",
     "link[rel='stylesheet']",
     "link[rel='preload']",
     "meta",
@@ -204,6 +206,58 @@ def _unescape_pagebuilder_html(html_content: str) -> str:
     return str(soup)
 
 
+_VIDEO_EMBED_HOST_RE = re.compile(
+    r"(^|\.)((?:youtube\.com)|(?:youtube-nocookie\.com)|(?:youtu\.be)"
+    r"|(?:vimeo\.com)|(?:player\.vimeo\.com)|(?:bilibili\.com)"
+    r"|(?:dailymotion\.com)|(?:wistia\.com)|(?:wistia\.net))$",
+    re.IGNORECASE,
+)
+
+
+def _iframe_is_video_embed(iframe) -> bool:
+    """Return True when an <iframe>'s src points at a known video host."""
+    src = (iframe.get("src") or iframe.get("data-src") or "").strip()
+    if not src:
+        return False
+    # Allow protocol-relative URLs to pass.
+    host_match = re.match(r"^(?:https?:)?//([^/]+)", src, re.IGNORECASE)
+    if not host_match:
+        return False
+    host = host_match.group(1).lower()
+    return bool(_VIDEO_EMBED_HOST_RE.search(host))
+
+
+def _wrap_video_iframe(soup: BeautifulSoup, iframe) -> None:
+    """Ensure a kept iframe is inside a responsive 16:9 wrapper."""
+    parent = iframe.parent
+    if parent and "pr-embed-video" in (parent.get("class") or []):
+        return
+    # Normalize iframe attributes for clean rendering.
+    src = iframe.get("src") or iframe.get("data-src") or ""
+    if src.startswith("//"):
+        src = "https:" + src
+    iframe["src"] = src
+    iframe["loading"] = iframe.get("loading") or "lazy"
+    iframe["frameborder"] = iframe.get("frameborder") or "0"
+    iframe["allowfullscreen"] = iframe.get("allowfullscreen", "")
+    if not iframe.get("allow"):
+        iframe["allow"] = (
+            "accelerometer; autoplay; clipboard-write; encrypted-media;"
+            " gyroscope; picture-in-picture; web-share"
+        )
+    iframe["style"] = (
+        "position:absolute; top:0; left:0; width:100%; height:100%; border:0;"
+    )
+    wrapper = soup.new_tag("div")
+    wrapper["class"] = ["pr-embed-video"]
+    wrapper["style"] = (
+        "position:relative; width:100%; padding-bottom:56.25%; height:0;"
+        " overflow:hidden; margin:16px 0;"
+    )
+    iframe.insert_before(wrapper)
+    wrapper.append(iframe.extract())
+
+
 def sanitize_html(html_content: str) -> str:
     """
     Remove scripts, navigation, and other non-content elements from HTML.
@@ -219,6 +273,15 @@ def sanitize_html(html_content: str) -> str:
     html_content = _unescape_pagebuilder_html(html_content)
 
     soup = BeautifulSoup(html_content, "html.parser")
+
+    # Step 0b: Decide which iframes survive. Video embeds (YouTube/Vimeo/etc.)
+    # are wrapped in a responsive 16:9 container so they render inside Builder.io;
+    # everything else is stripped before the generic selector pass runs.
+    for iframe in list(soup.find_all("iframe")):
+        if _iframe_is_video_embed(iframe):
+            _wrap_video_iframe(soup, iframe)
+        else:
+            iframe.decompose()
 
     # Remove all unwanted elements
     for selector in UNWANTED_SELECTORS:
