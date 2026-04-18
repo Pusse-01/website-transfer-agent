@@ -1174,6 +1174,16 @@ async def _capture_async(
                 flags=re.IGNORECASE,
             )
 
+            # Replace Magento product carousels with self-contained static
+            # tiles.  Magento fills price/title/cart via Knockout bindings,
+            # which get stripped when <script> tags are removed for Builder.
+            # Rebuild from the DOM data we captured so tiles render fully.
+            try:
+                from .product_tile_builder import rebuild_product_tiles
+                html = rebuild_product_tiles(html)
+            except Exception as e:
+                logger.warning("product_tile_builder failed (non-fatal): %s", e)
+
             # Final assembly: one self-contained fragment.
             # Append carousel CSS fixes to the captured stylesheet so they
             # override any conflicting Slick rules already in `css`.

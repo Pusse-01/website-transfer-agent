@@ -696,6 +696,17 @@ def process_html_for_builder(html_content: str) -> str:
     if not html_content:
         return html_content
 
+    # Step 0: Replace Magento product carousels with self-contained static
+    # tiles.  Magento's product tiles are populated by Knockout.js bindings
+    # that we strip when removing <script> tags; rebuilding from the DOM
+    # data preserves price/title/badges/cart buttons in the migrated output.
+    # Must run BEFORE sanitize_html so we can read the raw Magento markup.
+    try:
+        from .product_tile_builder import rebuild_product_tiles
+        html_content = rebuild_product_tiles(html_content)
+    except Exception as e:
+        logger.warning("product_tile_builder failed (non-fatal): %s", e)
+
     # Step 1: Sanitize — remove scripts and non-content elements
     html_content = sanitize_html(html_content)
 
