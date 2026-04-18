@@ -256,16 +256,24 @@ _CARD_STYLE = (
     "box-sizing:border-box;background:#fff;border:1px solid #eee;"
     "border-radius:8px;padding:12px;display:flex;flex-direction:column;"
     "gap:6px;text-decoration:none;color:inherit;position:relative;"
-    "min-height:100%;"
+    "min-height:340px;height:100%;"
 )
+# Classic "responsive square" technique: padding-bottom:100% gives the
+# wrapper a 1:1 aspect ratio in every browser since IE9 — more reliable
+# than the modern aspect-ratio property when the HTML is embedded inside
+# Builder.io's Custom Code container.
 _IMG_WRAP_STYLE = (
-    "position:relative;width:100%;aspect-ratio:1/1;display:flex;"
-    "align-items:center;justify-content:center;overflow:hidden;"
-    "background:#fafafa;border-radius:6px;"
+    "box-sizing:border-box;position:relative;width:100%;"
+    "padding-bottom:100%;background:#fafafa;border-radius:6px;"
+    "overflow:hidden;"
 )
 _IMG_STYLE = (
-    "max-width:100%;max-height:100%;width:100%;height:100%;"
+    "position:absolute;top:0;left:0;width:100%;height:100%;"
     "object-fit:contain;"
+)
+_BADGE_OVERLAY_STYLE = (
+    "position:absolute;top:6px;left:6px;display:flex;flex-direction:column;"
+    "gap:4px;align-items:flex-start;z-index:1;pointer-events:none;"
 )
 _BADGE_COLORS = {
     # Red for sale/discount, green for availability/new, orange for customize
@@ -296,11 +304,12 @@ def _badge_html(label: str) -> str:
 
 
 def _render_tile(t: dict) -> str:
-    badges_html = ""
+    # Overlay badges on the top-left of the image — matches the original
+    # pricerite look (sale/new product labels float over the product photo).
+    badges_overlay = ""
     if t["badges"]:
-        badges_html = (
-            '<div style="display:flex;flex-wrap:wrap;gap:4px;'
-            'margin-top:4px;">'
+        badges_overlay = (
+            f'<div style="{_BADGE_OVERLAY_STYLE}">'
             + "".join(_badge_html(b) for b in t["badges"])
             + "</div>"
         )
@@ -308,7 +317,8 @@ def _render_tile(t: dict) -> str:
     brand_html = ""
     if t["brand"]:
         brand_html = (
-            f'<div style="font-size:12px;color:#888;line-height:1.3;">'
+            '<div style="font-size:12px;color:#888;line-height:1.3;'
+            'margin-top:6px;">'
             f'{_escape(t["brand"])}</div>'
         )
 
@@ -351,8 +361,8 @@ def _render_tile(t: dict) -> str:
         )
 
     inner = (
-        f'<div style="{_IMG_WRAP_STYLE}">{img_tag}</div>'
-        f'{brand_html}{title_html}{price_html}{badges_html}'
+        f'<div style="{_IMG_WRAP_STYLE}">{img_tag}{badges_overlay}</div>'
+        f'{brand_html}{title_html}{price_html}'
     )
 
     if t["href"]:
@@ -364,34 +374,44 @@ def _render_tile(t: dict) -> str:
 
 
 def _render_carousel(tiles: list[dict], slides_per_view: int = 4) -> str:
-    """Render a horizontal, scroll-snap carousel with prev/next buttons.
+    """Render a horizontal, fixed-width carousel with prev/next buttons.
 
-    Uses CSS scroll-snap (no JS for the scroll itself). The buttons use a
-    tiny inline onclick to nudge scrollLeft; Builder.io's Custom Code
-    container allows inline handlers.  The carousel also works fine
-    without JS — the user can swipe/drag/wheel-scroll the track.
+    Each tile is a FIXED width (220px) instead of a percentage of the
+    container.  This is critical because Builder.io's Custom Code block
+    sits inside a column whose width is narrower than Streamlit's preview
+    iframe — percentage-based sizing shrinks tiles to microscopic sizes
+    inside Builder while looking fine in the preview.  Fixed widths +
+    horizontal overflow scroll give identical rendering in both places.
+
+    `slides_per_view` is accepted for API compatibility but only used to
+    decide whether to centre-align a very small tile list.
     """
-    spv = max(1, min(6, slides_per_view))
     gap = 12
+    tile_width = 220
     tile_html = "".join(
-        '<div style="flex:0 0 calc((100% - '
-        f'{gap * (spv - 1)}px) / {spv});scroll-snap-align:start;">'
+        f'<div style="box-sizing:border-box;flex:0 0 {tile_width}px;'
+        f'width:{tile_width}px;scroll-snap-align:start;">'
         + _render_tile(t)
         + "</div>"
         for t in tiles
     )
 
+    # When there are fewer tiles than fit in a typical row, justify them
+    # to the start so they don't stretch awkwardly.
+    justify = "flex-start"
+    if len(tiles) <= max(1, slides_per_view):
+        justify = "flex-start"  # explicit, not centred — carousels align left
+
     btn_style = (
-        "position:absolute;top:50%;transform:translateY(-50%);"
-        "width:36px;height:36px;border-radius:50%;border:none;"
+        "box-sizing:border-box;position:absolute;top:40%;"
+        "transform:translateY(-50%);width:36px;height:36px;"
+        "border-radius:50%;border:none;"
         "background:rgba(240,240,240,0.95);color:#444;font-size:20px;"
         "cursor:pointer;z-index:2;display:flex;align-items:center;"
         "justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,0.12);"
-        "line-height:1;"
+        "line-height:1;padding:0;"
     )
-    # Use previousElementSibling / nextElementSibling so the buttons don't
-    # depend on a unique class name — makes the output trivially robust to
-    # any class-stripping sanitizer.
+    # The track is the sibling of the button (next or prev).
     scroll_prev = (
         "var t=this.nextElementSibling;"
         "t.scrollBy({left:-t.clientWidth*0.85,behavior:'smooth'});"
@@ -403,11 +423,13 @@ def _render_carousel(tiles: list[dict], slides_per_view: int = 4) -> str:
 
     return (
         '<div class="pr-tile-carousel" '
-        'style="position:relative;width:100%;margin:16px 0;">'
+        'style="box-sizing:border-box;position:relative;width:100%;'
+        'margin:16px 0;">'
         f'<button type="button" aria-label="Previous" '
         f'style="{btn_style}left:-8px;" onclick="{scroll_prev}">&#8249;</button>'
         f'<div '
-        f'style="display:flex;gap:{gap}px;overflow-x:auto;'
+        f'style="box-sizing:border-box;display:flex;gap:{gap}px;'
+        f'justify-content:{justify};overflow-x:auto;overflow-y:hidden;'
         f'scroll-snap-type:x mandatory;scroll-behavior:smooth;'
         f'padding:4px 2px 12px;-webkit-overflow-scrolling:touch;'
         f'scrollbar-width:none;">'
