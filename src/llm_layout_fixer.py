@@ -38,12 +38,27 @@ logger = logging.getLogger(__name__)
 
 # Most capable OpenAI vision model available via API as of April 2025.
 # Override via OPENAI_MODEL env var.  gpt-4.1 > gpt-4o for layout fidelity.
+# gpt-4o-mini is the final fallback — it has the highest rate-limit ceiling
+# of any OpenAI vision model and is a lifesaver when the premium models are
+# throttled on your account tier.
 DEFAULT_MODEL = "gpt-4.1"
 FALLBACK_MODEL = "gpt-4o"
+LAST_RESORT_MODEL = "gpt-4o-mini"
 _RATE_LIMIT_RETRIES = 3        # max retries on 429 before giving up
 _RATE_LIMIT_INITIAL_WAIT = 5   # seconds (doubles each retry)
+_RATE_LIMIT_MAX_WAIT = 60      # cap — don't honor Retry-After values > this
+# Keep the payload lean so we don't blow our per-minute token budget on a
+# single call. Screenshots at detail:"low" cost ~85 tokens each (vs ~1500
+# for "high"); 30K of HTML is plenty to fix layout issues without context.
+_HTML_MAX_CHARS = 30_000
+_IMAGE_DETAIL = "low"
 DEFAULT_VIEWPORT_WIDTH = 1280
 DEFAULT_VIEWPORT_HEIGHT = 800
+
+# Raised by _post() when OpenAI returns a hard-stop 429 (billing quota,
+# no credits). Retrying doesn't help — surface to the caller immediately.
+class _QuotaExceeded(Exception):
+    pass
 
 
 def is_enabled() -> bool:
@@ -178,16 +193,33 @@ def _extract_html_from_response(text: str) -> str | None:
     return None
 
 
+def _parse_openai_error(response) -> tuple[str, str]:
+    """Extract (error_code, human_message) from an OpenAI error response."""
+    try:
+        body = response.json()
+        err = body.get("error", {}) if isinstance(body, dict) else {}
+        code = (err.get("code") or err.get("type") or "").strip()
+        msg = (err.get("message") or "").strip()
+        return code, msg
+    except Exception:
+        return "", ""
+
+
 def _call_openai_vision(
     original_png: str,
     preview_png: str,
     current_html: str,
     model: str,
-) -> str | None:
-    """Send both screenshots + the current HTML to OpenAI and get corrected HTML."""
+) -> tuple[str | None, str]:
+    """Send both screenshots + the current HTML to OpenAI and get corrected HTML.
+
+    Returns (html_or_None, error_message). The error_message is empty on
+    success and contains a concise human-readable reason on failure so the
+    caller can surface it to the UI.
+    """
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
-        return None
+        return None, "OPENAI_API_KEY not set."
 
     # We intentionally use the REST endpoint directly so we don't force a new
     # dependency on the openai SDK — requests is already in the project.
@@ -196,14 +228,14 @@ def _call_openai_vision(
     orig_b64 = _b64_image(original_png)
     prev_b64 = _b64_image(preview_png)
     if not orig_b64 or not prev_b64:
-        return None
+        return None, "Could not read screenshot files."
 
-    # Keep the HTML we send reasonable in size. Very long pages overflow the
-    # context window; truncating to ~120k chars preserves structure for the
-    # vast majority of real-world pages.
+    # Keep the HTML we send lean so we don't eat through the per-minute token
+    # budget in a single call. 30K is enough to give the model plenty of
+    # layout context without overwhelming the rate limit.
     html_snippet = current_html
-    if len(html_snippet) > 120_000:
-        html_snippet = html_snippet[:120_000] + "\n<!-- TRUNCATED -->"
+    if len(html_snippet) > _HTML_MAX_CHARS:
+        html_snippet = html_snippet[:_HTML_MAX_CHARS] + "\n<!-- TRUNCATED -->"
 
     system_prompt = (
         "You are a senior front-end engineer fixing HTML that was scraped from "
@@ -251,14 +283,14 @@ def _call_openai_vision(
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/png;base64,{orig_b64}",
-                            "detail": "high",
+                            "detail": _IMAGE_DETAIL,
                         },
                     },
                     {
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/png;base64,{prev_b64}",
-                            "detail": "high",
+                            "detail": _IMAGE_DETAIL,
                         },
                     },
                 ],
@@ -266,9 +298,12 @@ def _call_openai_vision(
         ],
     }
 
-    def _post(m: str) -> str | None:
+    def _post(m: str) -> tuple[str | None, str]:
+        """Try one model. Returns (html, error). Raises _QuotaExceeded on
+        insufficient_quota so the caller stops trying further models."""
         payload["model"] = m
         wait = _RATE_LIMIT_INITIAL_WAIT
+        last_err = ""
         for attempt in range(_RATE_LIMIT_RETRIES + 1):
             try:
                 response = requests.post(
@@ -287,33 +322,81 @@ def _call_openai_vision(
                     .get("message", {})
                     .get("content", "")
                 )
-                return _extract_html_from_response(content)
+                html = _extract_html_from_response(content)
+                if html:
+                    return html, ""
+                return None, f"{m}: model returned non-HTML response."
             except requests.HTTPError as he:
-                status = he.response.status_code if he.response is not None else None
-                if status == 429 and attempt < _RATE_LIMIT_RETRIES:
-                    logger.warning(
-                        "OpenAI %s rate-limited (429) — retrying in %ds "
-                        "(attempt %d/%d)",
-                        m, wait, attempt + 1, _RATE_LIMIT_RETRIES,
-                    )
-                    time.sleep(wait)
-                    wait *= 2
-                    continue
-                # 400/404 = model not available; other errors → fall through
-                logger.warning("OpenAI %s failed (%s) — will try fallback.", m, he)
-                return None
-            except Exception as e:
-                logger.warning("OpenAI layout-fix request failed on %s: %s", m, e)
-                return None
-        return None
+                resp = he.response
+                status = resp.status_code if resp is not None else None
+                code, msg = _parse_openai_error(resp) if resp is not None else ("", "")
 
-    out = _post(model)
-    if out:
-        return out
-    if model != FALLBACK_MODEL:
-        logger.info("Retrying LLM layout fix with fallback model %s", FALLBACK_MODEL)
-        return _post(FALLBACK_MODEL)
-    return None
+                if status == 429:
+                    # insufficient_quota means the billing quota is exhausted —
+                    # retrying doesn't help, and neither does swapping models
+                    # (it's per-account). Bail out hard so the UI can tell the
+                    # user to top up / check billing.
+                    if code == "insufficient_quota":
+                        raise _QuotaExceeded(
+                            msg or "OpenAI account quota exhausted — check billing."
+                        )
+
+                    # Honor Retry-After if OpenAI tells us when to come back
+                    ra = resp.headers.get("Retry-After") if resp is not None else None
+                    try:
+                        ra_wait = int(float(ra)) if ra else 0
+                    except ValueError:
+                        ra_wait = 0
+                    sleep_for = min(max(wait, ra_wait), _RATE_LIMIT_MAX_WAIT)
+
+                    if attempt < _RATE_LIMIT_RETRIES:
+                        logger.warning(
+                            "OpenAI %s rate-limited (429%s) — retry in %ds "
+                            "(attempt %d/%d). %s",
+                            m, f" {code}" if code else "",
+                            sleep_for, attempt + 1, _RATE_LIMIT_RETRIES, msg,
+                        )
+                        time.sleep(sleep_for)
+                        wait *= 2
+                        last_err = f"{code or 'rate_limit'}: {msg}" if msg else "rate-limited"
+                        continue
+                    last_err = (
+                        f"{m}: rate-limited after {_RATE_LIMIT_RETRIES} retries"
+                        + (f" ({msg})" if msg else "")
+                    )
+                    logger.warning("OpenAI %s gave up after retries: %s", m, last_err)
+                    return None, last_err
+
+                # 400/404 = model not available; surface the real reason
+                last_err = f"{m}: HTTP {status}" + (f" — {msg}" if msg else f" — {he}")
+                logger.warning("OpenAI %s failed (%s).", m, last_err)
+                return None, last_err
+            except Exception as e:
+                last_err = f"{m}: {type(e).__name__}: {e}"
+                logger.warning("OpenAI layout-fix request failed on %s: %s", m, e)
+                return None, last_err
+        return None, last_err or f"{m}: unknown failure"
+
+    # Try models in order: user-requested → fallback → last-resort mini.
+    tried: list[str] = []
+    errors: list[str] = []
+    for m in [model, FALLBACK_MODEL, LAST_RESORT_MODEL]:
+        if m in tried:
+            continue
+        tried.append(m)
+        try:
+            html, err = _post(m)
+        except _QuotaExceeded as qe:
+            # Billing/quota is per-account — don't try other models.
+            return None, f"OpenAI quota exhausted: {qe}"
+        if html:
+            return html, ""
+        if err:
+            errors.append(err)
+        if len(tried) > 1:
+            logger.info("Falling back to next model after %s failed.", m)
+
+    return None, " | ".join(errors) or "All OpenAI models failed."
 
 
 _VIDEO_IFRAME_RE = re.compile(
@@ -391,7 +474,7 @@ async def _fix_layout_async(
             logger.info("Skipping LLM layout fix — could not render preview HTML.")
             return current_html
 
-        fixed = _call_openai_vision(
+        fixed, err = _call_openai_vision(
             original_png=original_png,
             preview_png=preview_png,
             current_html=current_html,
@@ -399,7 +482,10 @@ async def _fix_layout_async(
         )
 
         if not fixed:
-            logger.info("LLM returned no usable HTML — keeping original processed output.")
+            logger.info(
+                "LLM returned no usable HTML — keeping original processed output. %s",
+                err or "",
+            )
             return current_html
 
         if not _validate_fix(current_html, fixed):
@@ -532,14 +618,14 @@ def refine_layout_with_screenshots(
             out["error"] = "Failed to render the preview HTML for screenshot."
             return
         out["preview_screenshot"] = preview_png
-        fixed = _call_openai_vision(
+        fixed, err = _call_openai_vision(
             original_png=original_png,
             preview_png=preview_png,
             current_html=current_html,
             model=out["model"],
         )
         if not fixed:
-            out["error"] = "Model returned no usable HTML (see logs)."
+            out["error"] = err or "Model returned no usable HTML (see logs)."
             return
         if not _validate_fix(current_html, fixed):
             out["error"] = "LLM output rejected by validator (see logs)."
