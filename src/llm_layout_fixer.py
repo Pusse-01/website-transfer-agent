@@ -77,12 +77,20 @@ def _check_playwright() -> bool:
 
 
 async def _screenshot_url(url: str, out_path: str) -> bool:
-    """Capture a full-page screenshot of a live URL."""
+    """Capture a full-page screenshot of a live URL.
+
+    Uses domcontentloaded (fast, reliable) instead of networkidle.
+    Heavy pages with analytics/chat widgets can keep a connection open
+    indefinitely, causing networkidle to time out. We navigate, wait for
+    DOM, give JS a couple of extra seconds to paint, then screenshot.
+    If the goto itself times out we still attempt a screenshot of
+    whatever has loaded rather than giving up entirely.
+    """
     if not _check_playwright():
         logger.warning("Playwright not installed — cannot capture original screenshot.")
         return False
 
-    from playwright.async_api import async_playwright
+    from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
     try:
         async with async_playwright() as p:
@@ -95,16 +103,27 @@ async def _screenshot_url(url: str, out_path: str) -> bool:
                 ignore_https_errors=True,
             )
             page = await context.new_page()
-            await page.goto(url, wait_until="networkidle", timeout=60000)
-            await page.wait_for_timeout(1500)
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1000)
-            await page.evaluate("window.scrollTo(0, 0)")
-            await page.wait_for_timeout(500)
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            except PWTimeout:
+                # The page took too long but may still be partially rendered.
+                # Try to screenshot whatever is there rather than aborting.
+                logger.warning(
+                    "Timeout navigating to %s — taking screenshot of partial load.", url
+                )
+            await page.wait_for_timeout(2500)
+            # Scroll to bottom to trigger lazy-load images, then back to top.
+            try:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await page.wait_for_timeout(1000)
+                await page.evaluate("window.scrollTo(0, 0)")
+                await page.wait_for_timeout(500)
+            except Exception:
+                pass  # non-fatal; proceed to screenshot
             await page.screenshot(path=out_path, full_page=True)
             await browser.close()
         return True
-    except Exception as e:  # pragma: no cover - network-dependent
+    except Exception as e:
         logger.warning("Failed to screenshot %s: %s", url, e)
         return False
 
@@ -147,8 +166,13 @@ async def _screenshot_html(html_content: str, out_path: str) -> bool:
                 },
             )
             page = await context.new_page()
-            await page.goto(f"file://{html_path}", wait_until="networkidle", timeout=30000)
-            await page.wait_for_timeout(800)
+            try:
+                await page.goto(
+                    f"file://{html_path}", wait_until="domcontentloaded", timeout=30000
+                )
+            except Exception:
+                pass  # partial load is fine — screenshot what's there
+            await page.wait_for_timeout(1200)
             await page.screenshot(path=out_path, full_page=True)
             await browser.close()
         return True

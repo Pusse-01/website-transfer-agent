@@ -136,10 +136,14 @@ class VisualVerifier:
                 )
                 page = await context.new_page()
 
-                # Navigate and wait for network idle
-                await page.goto(url, wait_until="networkidle", timeout=60000)
-                # Extra wait for lazy-loaded images
-                await page.wait_for_timeout(2000)
+                # domcontentloaded is reliable; networkidle can hang forever
+                # on pages with analytics/chat widgets that keep connections open.
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    pass  # screenshot partial load rather than aborting
+                # Extra wait for lazy-loaded images / JS paint
+                await page.wait_for_timeout(2500)
 
                 # Scroll to bottom to trigger lazy loading, then back to top
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
