@@ -248,32 +248,51 @@ def _extract_tile(tile: Tag) -> dict:
 # ---------------------------------------------------------------------------
 # HTML rendering.
 # ---------------------------------------------------------------------------
-# Inline-style everything: Builder.io's Custom Code container has its own
-# base stylesheet and our classes could collide.  Using inline styles
-# guarantees what we ship is what the user sees.
+# Fixed-pixel, maximally bulletproof layout.
+#
+# Why we don't use:
+#   - flex parents with percentage widths → collapse inside narrow containers
+#   - padding-bottom:100% + absolute-positioned <img> → the captured site
+#     stylesheet often carries `img { height: auto !important }` which beats
+#     our inline height:100% and collapses the wrapper to zero height
+#   - aspect-ratio → unpredictable inside Builder.io's Custom Code block
+#
+# Instead: every dimension is an explicit pixel value set with !important so
+# it wins against captured site CSS, Builder.io's default stylesheet, and
+# premailer's post-processing.  The img is a direct child (no wrapper
+# gymnastics), sized explicitly to a fixed square.
+# ---------------------------------------------------------------------------
+TILE_WIDTH = 220
+IMG_SIZE = 200            # img is 200x200, leaving 10px padding each side of the 220 card
+CARD_HEIGHT = 360         # fixed total height — never collapses
+CARD_GAP = 12
 
 _CARD_STYLE = (
-    "box-sizing:border-box;background:#fff;border:1px solid #eee;"
-    "border-radius:8px;padding:12px;display:flex;flex-direction:column;"
-    "gap:6px;text-decoration:none;color:inherit;position:relative;"
-    "min-height:340px;height:100%;"
-)
-# Classic "responsive square" technique: padding-bottom:100% gives the
-# wrapper a 1:1 aspect ratio in every browser since IE9 — more reliable
-# than the modern aspect-ratio property when the HTML is embedded inside
-# Builder.io's Custom Code container.
-_IMG_WRAP_STYLE = (
-    "box-sizing:border-box;position:relative;width:100%;"
-    "padding-bottom:100%;background:#fafafa;border-radius:6px;"
-    "overflow:hidden;"
+    f"box-sizing:border-box !important;"
+    f"display:inline-block !important;vertical-align:top !important;"
+    f"width:{TILE_WIDTH}px !important;height:{CARD_HEIGHT}px !important;"
+    f"background:#fff !important;border:1px solid #eee !important;"
+    f"border-radius:8px !important;padding:10px !important;"
+    f"text-decoration:none !important;color:inherit !important;"
+    f"position:relative !important;white-space:normal !important;"
+    f"overflow:hidden !important;"
+    # Reset the track's font-size:0 back to a normal baseline so the text
+    # inside the card renders at its declared size.
+    f"font-size:14px !important;line-height:1.4 !important;"
 )
 _IMG_STYLE = (
-    "position:absolute;top:0;left:0;width:100%;height:100%;"
-    "object-fit:contain;"
+    f"display:block !important;"
+    f"width:{IMG_SIZE}px !important;height:{IMG_SIZE}px !important;"
+    f"max-width:{IMG_SIZE}px !important;max-height:{IMG_SIZE}px !important;"
+    f"object-fit:contain !important;object-position:center !important;"
+    f"margin:0 auto 6px !important;background:#fafafa !important;"
+    f"border-radius:6px !important;border:0 !important;"
 )
 _BADGE_OVERLAY_STYLE = (
-    "position:absolute;top:6px;left:6px;display:flex;flex-direction:column;"
-    "gap:4px;align-items:flex-start;z-index:1;pointer-events:none;"
+    "position:absolute !important;top:12px !important;left:12px !important;"
+    "display:flex !important;flex-direction:column !important;"
+    "gap:4px !important;align-items:flex-start !important;"
+    "z-index:2 !important;pointer-events:none !important;"
 )
 _BADGE_COLORS = {
     # Red for sale/discount, green for availability/new, orange for customize
@@ -296,16 +315,17 @@ def _badge_html(label: str) -> str:
     outline = bg == "#fff"
     border = f"1px solid {fg}" if outline else "none"
     return (
-        f'<span style="display:inline-block;padding:2px 8px;'
-        f'font-size:12px;font-weight:600;border-radius:4px;'
-        f'background:{bg};color:{fg};border:{border};'
-        f'line-height:1.4;white-space:nowrap;">{label}</span>'
+        f'<span style="display:inline-block !important;padding:2px 8px !important;'
+        f'font-size:12px !important;font-weight:600 !important;'
+        f'border-radius:4px !important;'
+        f'background:{bg} !important;color:{fg} !important;border:{border} !important;'
+        f'line-height:1.4 !important;white-space:nowrap !important;">{label}</span>'
     )
 
 
 def _render_tile(t: dict) -> str:
-    # Overlay badges on the top-left of the image — matches the original
-    # pricerite look (sale/new product labels float over the product photo).
+    # Badges overlay the top-left corner (positioned absolute relative to the
+    # card, which is position:relative).
     badges_overlay = ""
     if t["badges"]:
         badges_overlay = (
@@ -317,17 +337,20 @@ def _render_tile(t: dict) -> str:
     brand_html = ""
     if t["brand"]:
         brand_html = (
-            '<div style="font-size:12px;color:#888;line-height:1.3;'
-            'margin-top:6px;">'
+            '<div style="font-size:12px !important;color:#888 !important;'
+            'line-height:1.3 !important;margin:0 0 2px !important;'
+            'white-space:nowrap !important;overflow:hidden !important;'
+            'text-overflow:ellipsis !important;">'
             f'{_escape(t["brand"])}</div>'
         )
 
     title_html = ""
     if t["title"]:
         title_html = (
-            '<div style="font-size:14px;color:#222;line-height:1.35;'
-            'font-weight:500;display:-webkit-box;-webkit-line-clamp:2;'
-            '-webkit-box-orient:vertical;overflow:hidden;min-height:2.7em;">'
+            '<div style="font-size:13px !important;color:#222 !important;'
+            'line-height:1.35 !important;font-weight:500 !important;'
+            'margin:0 0 6px !important;max-height:2.7em !important;'
+            'overflow:hidden !important;">'
             f'{_escape(t["title"])}</div>'
         )
 
@@ -336,18 +359,19 @@ def _render_tile(t: dict) -> str:
         parts = []
         if t["old_price"]:
             parts.append(
-                '<span style="font-size:12px;color:#aaa;'
-                'text-decoration:line-through;">'
+                '<span style="font-size:12px !important;color:#aaa !important;'
+                'text-decoration:line-through !important;margin-right:6px !important;'
+                'white-space:nowrap !important;">'
                 f'{_escape(t["old_price"])}</span>'
             )
         if t["new_price"]:
             parts.append(
-                '<span style="font-size:16px;color:#ff6b00;font-weight:700;">'
+                '<span style="font-size:16px !important;color:#ff6b00 !important;'
+                'font-weight:700 !important;white-space:nowrap !important;">'
                 f'{_escape(t["new_price"])}</span>'
             )
         price_html = (
-            '<div style="display:flex;flex-wrap:wrap;align-items:baseline;'
-            'gap:6px;margin-top:auto;">'
+            '<div style="margin:0 !important;line-height:1.3 !important;">'
             + "".join(parts)
             + "</div>"
         )
@@ -357,13 +381,12 @@ def _render_tile(t: dict) -> str:
     if img_src:
         img_tag = (
             f'<img src="{_escape_attr(img_src)}" alt="{_escape_attr(t["title"])}" '
-            f'loading="lazy" style="{_IMG_STYLE}"/>'
+            f'loading="lazy" '
+            f'width="{IMG_SIZE}" height="{IMG_SIZE}" '
+            f'style="{_IMG_STYLE}"/>'
         )
 
-    inner = (
-        f'<div style="{_IMG_WRAP_STYLE}">{img_tag}{badges_overlay}</div>'
-        f'{brand_html}{title_html}{price_html}'
-    )
+    inner = f'{img_tag}{badges_overlay}{brand_html}{title_html}{price_html}'
 
     if t["href"]:
         return (
@@ -376,67 +399,69 @@ def _render_tile(t: dict) -> str:
 def _render_carousel(tiles: list[dict], slides_per_view: int = 4) -> str:
     """Render a horizontal, fixed-width carousel with prev/next buttons.
 
-    Each tile is a FIXED width (220px) instead of a percentage of the
-    container.  This is critical because Builder.io's Custom Code block
-    sits inside a column whose width is narrower than Streamlit's preview
-    iframe — percentage-based sizing shrinks tiles to microscopic sizes
-    inside Builder while looking fine in the preview.  Fixed widths +
-    horizontal overflow scroll give identical rendering in both places.
+    Layout uses `display: inline-block` + `white-space: nowrap` on the track
+    instead of flex.  This is dead simple and supported everywhere; flex
+    containers inside Builder.io's Custom Code block were getting their
+    children squashed by conflicting ancestor CSS.  With inline-block +
+    fixed-pixel tile widths, the horizontal layout is immune to any
+    display/flex-related ancestor interference.
 
-    `slides_per_view` is accepted for API compatibility but only used to
-    decide whether to centre-align a very small tile list.
+    `slides_per_view` is accepted for API compatibility; it's only used to
+    decide whether to scroll-snap.
     """
-    gap = 12
-    tile_width = 220
-    tile_html = "".join(
-        f'<div style="box-sizing:border-box;flex:0 0 {tile_width}px;'
-        f'width:{tile_width}px;scroll-snap-align:start;">'
+    # Tiles are wrapped in a <span> with margin-right for spacing (inline-block
+    # doesn't honour flex `gap`). The track sets font-size:0 to eliminate the
+    # whitespace between inline-blocks; each tile resets font-size back via its
+    # own inline styles.
+    wrapped_tiles = "".join(
+        f'<span style="display:inline-block !important;vertical-align:top !important;'
+        f'margin-right:{CARD_GAP}px !important;font-size:0 !important;'
+        f'line-height:1 !important;">'
         + _render_tile(t)
-        + "</div>"
+        + "</span>"
         for t in tiles
     )
 
-    # When there are fewer tiles than fit in a typical row, justify them
-    # to the start so they don't stretch awkwardly.
-    justify = "flex-start"
-    if len(tiles) <= max(1, slides_per_view):
-        justify = "flex-start"  # explicit, not centred — carousels align left
-
     btn_style = (
-        "box-sizing:border-box;position:absolute;top:40%;"
-        "transform:translateY(-50%);width:36px;height:36px;"
-        "border-radius:50%;border:none;"
-        "background:rgba(240,240,240,0.95);color:#444;font-size:20px;"
-        "cursor:pointer;z-index:2;display:flex;align-items:center;"
-        "justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,0.12);"
-        "line-height:1;padding:0;"
+        "box-sizing:border-box !important;position:absolute !important;"
+        f"top:{IMG_SIZE // 2 + 10}px !important;"  # vertically centered on the image
+        "transform:translateY(-50%) !important;"
+        "width:36px !important;height:36px !important;"
+        "border-radius:50% !important;border:none !important;"
+        "background:rgba(240,240,240,0.95) !important;color:#444 !important;"
+        "font-size:20px !important;cursor:pointer !important;z-index:3 !important;"
+        "text-align:center !important;line-height:36px !important;"
+        "padding:0 !important;"
+        "box-shadow:0 1px 4px rgba(0,0,0,0.12) !important;"
     )
-    # The track is the sibling of the button (next or prev).
     scroll_prev = (
         "var t=this.nextElementSibling;"
-        "t.scrollBy({left:-t.clientWidth*0.85,behavior:'smooth'});"
+        "if(t){t.scrollBy({left:-t.clientWidth*0.85,behavior:'smooth'});}"
     )
     scroll_next = (
         "var t=this.previousElementSibling;"
-        "t.scrollBy({left:t.clientWidth*0.85,behavior:'smooth'});"
+        "if(t){t.scrollBy({left:t.clientWidth*0.85,behavior:'smooth'});}"
     )
 
     return (
         '<div class="pr-tile-carousel" '
-        'style="box-sizing:border-box;position:relative;width:100%;'
-        'margin:16px 0;">'
+        'style="box-sizing:border-box !important;position:relative !important;'
+        'width:100% !important;max-width:100% !important;'
+        'margin:16px 0 !important;padding:0 !important;'
+        'font-size:0 !important;">'
         f'<button type="button" aria-label="Previous" '
-        f'style="{btn_style}left:-8px;" onclick="{scroll_prev}">&#8249;</button>'
-        f'<div '
-        f'style="box-sizing:border-box;display:flex;gap:{gap}px;'
-        f'justify-content:{justify};overflow-x:auto;overflow-y:hidden;'
-        f'scroll-snap-type:x mandatory;scroll-behavior:smooth;'
-        f'padding:4px 2px 12px;-webkit-overflow-scrolling:touch;'
-        f'scrollbar-width:none;">'
-        f'{tile_html}'
+        f'style="{btn_style}left:-8px !important;" onclick="{scroll_prev}">&#8249;</button>'
+        f'<div class="pr-tile-track" '
+        f'style="box-sizing:border-box !important;width:100% !important;'
+        f'max-width:100% !important;white-space:nowrap !important;'
+        f'overflow-x:auto !important;overflow-y:hidden !important;'
+        f'padding:4px 2px 12px !important;'
+        f'-webkit-overflow-scrolling:touch !important;'
+        f'font-size:0 !important;">'
+        f'{wrapped_tiles}'
         f'</div>'
         f'<button type="button" aria-label="Next" '
-        f'style="{btn_style}right:-8px;" onclick="{scroll_next}">&#8250;</button>'
+        f'style="{btn_style}right:-8px !important;" onclick="{scroll_next}">&#8250;</button>'
         '</div>'
     )
 

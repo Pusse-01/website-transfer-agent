@@ -769,8 +769,39 @@ def process_html_for_builder(html_content: str) -> str:
 {body_html}
 </div>"""
 
+    # Step 3b: Shield our rebuilt product carousels from premailer. Premailer
+    # mangles inline `!important` declarations into bogus HTML attributes
+    # (e.g. <img width="200px !important">), corrupts the output, and can also
+    # rewrite our width/height rules. We swap each .pr-tile-carousel subtree
+    # for an opaque placeholder, run premailer on the rest, then splice the
+    # carousels back in untouched.
+    shielded_carousels: list[str] = []
+
+    def _extract_carousel(match: re.Match) -> str:
+        shielded_carousels.append(match.group(0))
+        return f"<!--PR_CAROUSEL_PLACEHOLDER_{len(shielded_carousels) - 1}-->"
+
+    # Match a full <div class="pr-tile-carousel" ...> ... </div> subtree, with
+    # nested <div>s counted by reusing BeautifulSoup rather than regex.
+    _carousel_soup = BeautifulSoup(full_html, "html.parser")
+    for carousel in _carousel_soup.find_all("div", class_="pr-tile-carousel"):
+        shielded_carousels.append(str(carousel))
+        placeholder = _carousel_soup.new_string(
+            f"__PR_CAROUSEL_PLACEHOLDER_{len(shielded_carousels) - 1}__"
+        )
+        carousel.replace_with(placeholder)
+    full_html = str(_carousel_soup)
+
     # Step 4: Inline remaining CSS (class-based rules premailer CAN handle)
     inlined = _inline_css(full_html)
+
+    # Splice shielded carousels back in
+    if shielded_carousels:
+        for i, carousel_html in enumerate(shielded_carousels):
+            inlined = inlined.replace(
+                f"__PR_CAROUSEL_PLACEHOLDER_{i}__",
+                carousel_html,
+            )
 
     # Clean up premailer artifacts
     inlined_soup = BeautifulSoup(inlined, "html.parser")
