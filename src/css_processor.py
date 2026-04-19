@@ -756,6 +756,7 @@ def process_html_for_builder(html_content: str) -> str:
     max-width: 100%;
     height: auto;
 }}
+
 /* --- ADD BUILDER.IO ROW OVERRIDES HERE --- */
 .migrated-live-content [data-content-type="row"],
 .migrated-live-content [data-content-type="column-group"],
@@ -767,6 +768,72 @@ def process_html_for_builder(html_content: str) -> str:
 .migrated-live-content .cmsBlockRoot.popular_search .popular-search-items {{
     flex-direction: row !important;
 }}
+
+/* --- BULLETPROOF PRODUCT TILES (BUILDER.IO FIX) --- */
+/* Stop Builder from turning every div into a vertical flex column */
+.migrated-live-content .galleryItemRoot div {
+    display: block;
+}
+
+/* Force the product image wrapper to be a perfect square */
+.migrated-live-content .galleryItemImages {
+    display: block !important;
+    position: relative !important;
+    width: 100% !important;
+    padding-bottom: 100% !important; /* Forces 1:1 Aspect Ratio safely */
+    overflow: hidden !important;
+}
+
+/* Lock the inner image container to the square */
+.migrated-live-content .galleryItemImages .imageRoot {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+/* Force the actual image to scale properly without stretching */
+.migrated-live-content .galleryItemImages .imageRoot img {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: contain !important;
+}
+
+/* Fix Promo Badges (現金更抵, 折實價) so they overlay the image correctly */
+.migrated-live-content .galleryItemImages .item-mpLabel-cZu,
+.migrated-live-content .item-outOfStockLayer-bxQ {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    z-index: 10 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 4px !important;
+}
+
+/* Fix Price and Delivery method horizontal alignment */
+.migrated-live-content .item-priceLogisticSection-FTm {
+    display: flex !important;
+    flex-direction: row !important;
+    justify-content: space-between !important;
+    align-items: flex-end !important;
+    width: 100% !important;
+}
+.migrated-live-content .logisticMethod {
+    display: flex !important;
+    flex-direction: row !important;
+    gap: 4px !important;
+}
+
+/* Stop Builder.io from forcing columns inside the tile */
+.migrated-live-content .galleryItemRoot {
+    display: block !important;
+}
 </style>"""
 
     body_html = str(soup)
@@ -795,7 +862,7 @@ def process_html_for_builder(html_content: str) -> str:
     # Match a full <div class="pr-tile-carousel" ...> ... </div> subtree, with
     # nested <div>s counted by reusing BeautifulSoup rather than regex.
     _carousel_soup = BeautifulSoup(full_html, "html.parser")
-    for carousel in _carousel_soup.find_all("div", class_="pr-tile-carousel"):
+    for carousel in _carousel_soup.find_all("div", class_=lambda c: c and ("pr-tile-carousel" in c or "pagebuilderProductsRoot" in c or "slider-root-Ddq" in c)):        
         shielded_carousels.append(str(carousel))
         placeholder = _carousel_soup.new_string(
             f"__PR_CAROUSEL_PLACEHOLDER_{len(shielded_carousels) - 1}__"
