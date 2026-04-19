@@ -585,12 +585,23 @@ _CAPTURE_SCRIPT = r"""
     ".page-title-wrapper",
     // Generic Magento sidebar classes.
     ".sidebar",".sidebar-main",".sidebar-additional",
-    // Pricerite / PWA Studio style hashed sidebar + widget wrappers.
+    // Pricerite / PWA Studio (Venia) hashed sidebar + widget wrappers.
+    // Pattern is `<component>-<variant>-<hash>`, e.g. sidebar-root-BHz.
     "[class*='sidebar-root']","[class*='sidebar_root']",
     "[class*='sidebarRoot']",
     "[class*='searchBlock']","[class*='search-root']","[class*='searchRoot']",
     "[class*='favorites']","[class*='Favorites']",
     "[class*='wishlist']","[class*='Wishlist']",
+    // PWA Studio blog widgets and sidebar blocks seen on Pricerite news pages.
+    "[class*='categoryList-']","[class*='categoryTree-']",
+    "[class*='tagList-']","[class*='tagCloud-']",
+    "[class*='searchBar-']","[class*='searchForm-']",
+    "[class*='newsletter-']","[class*='Newsletter-']",
+    "[class*='recentPosts-']","[class*='archive-']",
+    "[class*='blogSidebar-']","[class*='BlogSidebar-']",
+    "[class*='postSidebar-']","[class*='PostSidebar-']",
+    "[class*='shareButtons-']","[class*='socialShare-']",
+    "[class*='relatedPosts-']","[class*='RelatedPosts-']",
     // Amasty Blog sidebar widgets. Any of these can appear as a sibling of
     // the post when the page-main container is picked as the content root.
     ".amblog-sidebar",".amblog-widget",".amblog-widget-container",

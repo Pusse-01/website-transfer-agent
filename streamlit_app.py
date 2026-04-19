@@ -511,13 +511,59 @@ with tab_preview:
                                 )
                                 with st.expander("Capture diagnostics", expanded=False):
                                     st.caption(
-                                        "Top-level class names inside the captured root. "
-                                        "If you see your sidebar classes here, copy a "
-                                        "tighter selector into the 'Content Selector "
-                                        "Override' field in the sidebar."
+                                        "Structural summary of the captured fragment. "
+                                        "Identifies the classes actually on the page so "
+                                        "sidebar/widget strip rules can be added."
                                     )
-                                    _snippet = (capture.html_fragment or "")[:2000]
-                                    st.code(_snippet, language="html")
+                                    _frag = capture.html_fragment or ""
+                                    from bs4 import BeautifulSoup as _BS
+                                    try:
+                                        _soup = _BS(_frag, "html.parser")
+                                        _root = _soup.select_one(".migrated-live-content")
+                                        _body_node = None
+                                        if _root:
+                                            for _c in _root.children:
+                                                if getattr(_c, "name", None) not in (None, "style", "script"):
+                                                    _body_node = _c
+                                                    break
+                                        st.markdown(
+                                            f"**Content selector used:** `{capture.content_selector_used}`  \n"
+                                            f"**og:image:** `{capture.og_image or '(none)'}`  \n"
+                                            f"**Images found:** {len(capture.images)}  \n"
+                                            f"**Captured HTML size:** {len(_frag):,} bytes"
+                                        )
+                                        if _body_node is not None:
+                                            st.markdown("**Top-level class names inside the captured body:**")
+                                            _class_counts: dict[str, int] = {}
+                                            for _el in _body_node.find_all(True, recursive=True):
+                                                for _cls in (_el.get("class") or []):
+                                                    _class_counts[_cls] = _class_counts.get(_cls, 0) + 1
+                                            _top = sorted(
+                                                _class_counts.items(),
+                                                key=lambda kv: (-kv[1], kv[0]),
+                                            )[:40]
+                                            st.code(
+                                                "\n".join(f"{n:>4}  {c}" for c, n in _top),
+                                                language="text",
+                                            )
+                                    except Exception as _diag_err:
+                                        st.caption(f"(diagnostic parse failed: {_diag_err})")
+
+                                    st.download_button(
+                                        "Download full captured fragment",
+                                        data=_frag.encode("utf-8"),
+                                        file_name=f"capture_{url_key or 'page'}.html",
+                                        mime="text/html",
+                                    )
+                                    st.caption(
+                                        "First 4 KB of the raw fragment (after the "
+                                        "inlined stylesheet):"
+                                    )
+                                    # Skip past the leading <style>...</style> so the
+                                    # user sees actual body HTML, not just CSS rules.
+                                    _style_end = _frag.find("</style>")
+                                    _body_start = _frag.find(">", _style_end) + 1 if _style_end != -1 else 0
+                                    st.code(_frag[_body_start:_body_start + 4000], language="html")
                             else:
                                 st.warning(f"Live capture failed ({capture.error}); falling back to legacy scraper.")
                         except Exception as e:
