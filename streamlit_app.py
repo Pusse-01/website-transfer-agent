@@ -105,7 +105,7 @@ with st.sidebar:
     )
     blog_path = st.text_input(
         "Blog Path",
-        value=os.getenv("SOURCE_BLOG_PATH", "/blog/"),
+        value=os.getenv("SOURCE_BLOG_PATH", "/news/"),
     )
 
     st.divider()

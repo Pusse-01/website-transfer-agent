@@ -99,8 +99,8 @@ def main():
     )
     parser.add_argument(
         "--blog-path",
-        default="/blog/",
-        help="Blog path on source website (default: /blog/)",
+        default="/news/",
+        help="Blog path on source website (default: /news/)",
     )
 
     # Migration options

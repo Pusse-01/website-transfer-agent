@@ -67,7 +67,7 @@ class MigrationAgent:
         builder_model: str = "blog-post",
         blog_model: str = "blog-post",
         page_model: str = "page",
-        blog_path: str = "/blog/",
+        blog_path: str = "/news/",
         download_dir: str = "downloaded_images",
         run_id: str = None,
         builder_public_key: str = "",

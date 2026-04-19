@@ -69,7 +69,7 @@ def _extract_main_html(soup: BeautifulSoup, selectors: tuple[str, ...]) -> str:
 class BlogScraper:
     """Scrapes blog content from a Magento website with Amasty Blog."""
 
-    def __init__(self, base_url: str, blog_path: str = "/blog/"):
+    def __init__(self, base_url: str, blog_path: str = "/news/"):
         self.base_url = base_url.rstrip("/")
         self.blog_path = blog_path
         self.session = requests.Session()
