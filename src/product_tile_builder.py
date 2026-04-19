@@ -486,7 +486,12 @@ def _escape_attr(s: str) -> str:
 # ---------------------------------------------------------------------------
 # Carousel detection + replacement
 # ---------------------------------------------------------------------------
+# Covers the most common Magento / third-party carousel wrappers.  Order
+# matters: specific carousel wrappers first, then generic product-grid
+# containers used by related/upsell/crosssell widgets, then Magento page
+# builder product widgets.
 _CAROUSEL_SELECTORS = (
+    # Explicit carousel libraries
     ".slick-slider",
     ".slick-initialized",
     ".owl-carousel",
@@ -495,6 +500,26 @@ _CAROUSEL_SELECTORS = (
     "[data-role='carousel']",
     "[data-slick]",
     "[data-pc-carousel-count]",
+    "[data-amcarousel]",
+    # Magento Page Builder product widgets (carousel OR grid appearance)
+    '[data-content-type="products"]',
+    '[data-content-type="product"]',
+    # Magento native / widget product lists and grids — these are routinely
+    # rendered as Slick carousels on pricerite.com.hk via JS, but if the
+    # class that identifies them isn't `.slick-slider` itself (e.g. when the
+    # wrapper stays `.products.list.items.product-items` and only the inner
+    # `<ul>` becomes slick), we still need to rebuild them.
+    ".products-grid",
+    ".products.list",
+    ".product-items",
+    "ol.products",
+    "ul.products",
+    # Related / upsell / crosssell product blocks
+    ".block.related",
+    ".block.upsell",
+    ".block.crosssell",
+    ".block-products-list",
+    ".widget-product-carousel",
 )
 
 
@@ -516,6 +541,32 @@ def _find_carousels(soup: BeautifulSoup) -> list[Tag]:
                 seen.add(id(node))
         except Exception:
             continue
+
+    # Last-resort fallback: any container with 3+ product-tile descendants
+    # that isn't already inside a detected carousel.  Catches pricerite's
+    # custom non-class-tagged product rows.
+    for tile_sel in _PRODUCT_TILE_SELECTORS:
+        try:
+            tiles = soup.select(tile_sel)
+        except Exception:
+            continue
+        for tile in tiles:
+            parent = tile.parent
+            while parent is not None and parent.name not in (None, "[document]"):
+                # Skip if this parent already lives inside a detected carousel.
+                if any(parent is a or parent in a.parents for a in out):
+                    break
+                try:
+                    sibling_tiles = parent.select(tile_sel)
+                except Exception:
+                    sibling_tiles = []
+                if len(sibling_tiles) >= 3:
+                    if id(parent) not in seen:
+                        out.append(parent)
+                        seen.add(id(parent))
+                    break
+                parent = parent.parent
+
     return out
 
 
