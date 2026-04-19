@@ -43,6 +43,8 @@ from src.llm_layout_fixer import (
 
 load_dotenv()
 
+# Force install the Chromium browser for Playwright
+os.system("playwright install chromium")
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
