@@ -681,4 +681,63 @@ def rebuild_product_tiles(html: str) -> str:
     if replaced:
         logger.info("product_tile_builder: rebuilt %d product carousel(s)", replaced)
 
+    # Static fallback: for any Slick carousel that survived (either because
+    # detection missed it or because _tiles_within returned empty), normalize
+    # the markup so CSS alone can render it without Slick's JS. This is the
+    # reliable path — the reinit <script> we embed is often blocked by
+    # Builder.io's Custom Code sandbox or Streamlit's preview iframe.
+    _normalize_slick_inplace(soup)
+
     return str(soup)
+
+
+# ---------------------------------------------------------------------------
+# Static Slick normalizer
+#
+# Slick writes inline pixel widths on the track (e.g. `width:5940px`) and each
+# slide (e.g. `width:244px`), plus a `transform: translate3d(-1188px,...)` on
+# the track to emulate paging.  It also inserts `.slick-cloned` duplicates of
+# the first/last slides for its infinite-loop illusion.  When our reinit JS
+# can't run (Builder.io's sandbox blocks inline <script>, Streamlit's iframe
+# blocks setTimeout on migration, etc.), these artifacts break layout: the
+# track is 5× wider than its container and slides overflow to the right.
+#
+# Solution: strip those inline artifacts at build time.  The scoped CSS in
+# live_capture._CAROUSEL_CSS_FIXES then turns the remaining markup into a
+# horizontally scrollable flex row on desktop, wrapping to a column on mobile.
+# ---------------------------------------------------------------------------
+_SLICK_INLINE_WIDTH_RE = re.compile(r"width\s*:\s*[^;]*;?", re.IGNORECASE)
+_SLICK_INLINE_TRANSFORM_RE = re.compile(r"transform\s*:\s*[^;]*;?", re.IGNORECASE)
+
+
+def _strip_style_props(node: Tag, patterns: Iterable[re.Pattern]) -> None:
+    style = node.get("style") or ""
+    if not style:
+        return
+    new_style = style
+    for pat in patterns:
+        new_style = pat.sub("", new_style)
+    new_style = re.sub(r"\s*;\s*;+", ";", new_style).strip(" ;")
+    if new_style:
+        node["style"] = new_style
+    elif "style" in node.attrs:
+        del node["style"]
+
+
+def _normalize_slick_inplace(soup: BeautifulSoup) -> None:
+    # Remove Slick-cloned duplicate slides — they render as a second copy of
+    # the first/last products in the row.
+    for clone in soup.select(".slick-cloned"):
+        clone.decompose()
+
+    # Strip pixel widths + translate3d transforms from Slick's inline styles
+    # so CSS can re-size track/slides.  We skip our own rebuilt output (it
+    # uses classes pr-tile-carousel / pr-tile-track, not slick-*).
+    strip_width = (_SLICK_INLINE_WIDTH_RE,)
+    strip_width_and_transform = (_SLICK_INLINE_WIDTH_RE, _SLICK_INLINE_TRANSFORM_RE)
+    for track in soup.select(".slick-track"):
+        _strip_style_props(track, strip_width_and_transform)
+    for slide in soup.select(".slick-slide"):
+        _strip_style_props(slide, strip_width)
+    for lst in soup.select(".slick-list"):
+        _strip_style_props(lst, strip_width)

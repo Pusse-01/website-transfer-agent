@@ -234,25 +234,35 @@ _CAROUSEL_CSS_FIXES = """\
   font-weight: inherit;
 }
 
-/* ---- Slick carousel overrides ----------------------------------------- */
+/* ---- Slick carousel overrides -----------------------------------------
+   product_tile_builder.normalize_slick_carousels strips Slick's inline
+   pixel widths and translate3d transforms statically, so these rules are
+   the ONLY source of carousel sizing — no JS runtime required.  The
+   carousel renders as a horizontally scrollable flex row that wraps to
+   a stacked column on mobile. */
 .migrated-live-content .slick-list {
-  overflow: hidden !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
   position: relative;
   width: 100%;
+  -webkit-overflow-scrolling: touch;
 }
 .migrated-live-content .slick-track {
   display: flex !important;
-  flex-wrap: nowrap;
+  flex-wrap: nowrap !important;
+  /* Belt-and-braces in case the Python stripper missed the inline style
+     (e.g. the class `slick-track` was applied by a custom theme rename). */
+  transform: none !important;
+  width: auto !important;
+  min-width: 100%;
 }
 .migrated-live-content .slick-slide {
-  flex-shrink: 0;
+  flex: 0 0 auto !important;
   min-width: 0;
   box-sizing: border-box;
-  /* Override Slick's captured pixel width (from 1280px render) so slides
-     don't overflow before the carousel reinit JS runs. The JS then sets
-     slide.style.width = percentage as an inline style, which takes
-     precedence over this declaration. */
-  width: auto;
+  /* Override any captured pixel width from the 1280px render. */
+  width: auto !important;
+  max-width: 320px;
 }
 .migrated-live-content .slick-slide > div {
   height: 100%;
@@ -351,6 +361,11 @@ _CAROUSEL_CSS_FIXES = """\
     max-width: 100% !important;
     flex-basis: auto !important;
     margin-bottom: 16px;
+  }
+  /* Slick carousel: keep horizontal scroll on mobile so product tiles don't
+     stretch to full-width (which looks wrong for a 200px product image). */
+  .migrated-live-content .slick-slide {
+    max-width: 240px;
   }
 }
 """
