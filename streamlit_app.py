@@ -149,6 +149,18 @@ with st.sidebar:
     if not _live_avail:
         st.caption("Playwright not installed — run `pip install playwright && playwright install chromium`.")
 
+    content_selector_override = st.text_input(
+        "Content Selector Override",
+        value=os.getenv("CONTENT_SELECTOR_OVERRIDE", ""),
+        help=(
+            "Optional CSS selector that wraps ONLY the post body (e.g. "
+            "`.amblog-post-view` or `.blog-article-detail`). When set, live "
+            "capture uses this instead of its default list, which prevents "
+            "the sidebar/search/categories from leaking in. Leave blank to "
+            "use auto-detection."
+        ),
+    )
+
     with st.expander("Magento admin login (only for non-public pages)", expanded=False):
         st.caption(
             "Not required for CMS pages like `/hk/zh/intro-fur-tips` — those are already public. "
@@ -471,7 +483,13 @@ with tab_preview:
                                     "password": magento_password,
                                     "otp": magento_otp or "",
                                 }
-                            capture = capture_live_fragment(primary_url, login=login)
+                            _cs_override = content_selector_override.strip() or None
+                            _selectors = (_cs_override,) if _cs_override else None
+                            capture = capture_live_fragment(
+                                primary_url,
+                                login=login,
+                                content_selectors=_selectors,
+                            )
                             if capture.ok:
                                 post_data = {
                                     "title": capture.title,
@@ -491,6 +509,15 @@ with tab_preview:
                                     f"Live capture OK — {capture.css_rule_count} CSS rules from "
                                     f"{capture.content_selector_used!r}"
                                 )
+                                with st.expander("Capture diagnostics", expanded=False):
+                                    st.caption(
+                                        "Top-level class names inside the captured root. "
+                                        "If you see your sidebar classes here, copy a "
+                                        "tighter selector into the 'Content Selector "
+                                        "Override' field in the sidebar."
+                                    )
+                                    _snippet = (capture.html_fragment or "")[:2000]
+                                    st.code(_snippet, language="html")
                             else:
                                 st.warning(f"Live capture failed ({capture.error}); falling back to legacy scraper.")
                         except Exception as e:
@@ -591,7 +618,13 @@ with tab_preview:
                         post_data_b = None
                         if use_live_capture and primary_url_b:
                             try:
-                                cap = capture_live_fragment(primary_url_b, login=login)
+                                _cs_override_b = content_selector_override.strip() or None
+                                _selectors_b = (_cs_override_b,) if _cs_override_b else None
+                                cap = capture_live_fragment(
+                                    primary_url_b,
+                                    login=login,
+                                    content_selectors=_selectors_b,
+                                )
                                 if cap.ok:
                                     post_data_b = {
                                         "title": cap.title,

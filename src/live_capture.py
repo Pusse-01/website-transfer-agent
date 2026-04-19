@@ -1239,10 +1239,35 @@ async def _capture_async(
             # The carousel reinit script re-wires arrow buttons and converts
             # Slick's pixel-based layout to percentage-based so it works at
             # any viewport width inside Builder.io.
+            # If og:image wasn't populated, fall back to the largest <img>
+            # we captured — this is the cover image for news/blog posts that
+            # don't expose an Open Graph tag. `images` is ordered by DOM
+            # position, and lazy/srcset resolution already ran above, so
+            # images[0] is almost always the hero banner.
+            if not result.og_image and result.images:
+                result.og_image = result.images[0]
+
+            # Guarantee the cover image appears in the rendered fragment.
+            # Builder.io's blog-post model renders `html_content` as the
+            # article body — the `thumbnail` field is metadata only, not
+            # auto-inserted into the body. So we prepend the hero <img>
+            # here if it isn't already present in the captured HTML.
+            hero_html = ""
+            if result.og_image and result.og_image not in html:
+                _esc_alt = (result.title or "").replace('"', '&quot;')
+                hero_html = (
+                    '<div class="migrated-hero-image" '
+                    'style="margin:0 0 24px 0;">'
+                    f'<img src="{result.og_image}" alt="{_esc_alt}" '
+                    'style="width:100%;height:auto;display:block;" />'
+                    "</div>\n"
+                )
+
             result.html_fragment = (
                 '<div class="migrated-live-content">\n'
                 f"<style>\n{css}\n{_CAROUSEL_CSS_FIXES}\n</style>\n"
                 f"<script>\n{_CAROUSEL_REINIT_JS}\n</script>\n"
+                f"{hero_html}"
                 f"{html}\n"
                 "</div>"
             )
