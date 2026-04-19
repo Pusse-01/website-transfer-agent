@@ -756,6 +756,17 @@ def process_html_for_builder(html_content: str) -> str:
     max-width: 100%;
     height: auto;
 }}
+/* --- ADD BUILDER.IO ROW OVERRIDES HERE --- */
+.migrated-live-content [data-content-type="row"],
+.migrated-live-content [data-content-type="column-group"],
+.migrated-live-content .pagebuilder-column-group,
+.migrated-live-content .pagebuilder-column-line,
+.migrated-live-content .slick-track,
+.migrated-live-content .actionBar > div,
+.migrated-live-content .megaMenu-megaMenuInner-aaT,
+.migrated-live-content .cmsBlockRoot.popular_search .popular-search-items {{
+    flex-direction: row !important;
+}}
 </style>"""
 
     body_html = str(soup)
