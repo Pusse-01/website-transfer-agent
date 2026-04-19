@@ -373,12 +373,27 @@ _CAROUSEL_CSS_FIXES = """\
 
 # Content-area selectors, tried in order. The first one that exists and has
 # non-trivial text content wins. These match Magento CMS / Amasty Blog layouts.
+#
+# Order matters: the tightest, post-only wrappers come FIRST so we don't
+# accidentally pick a broad container that also includes the sidebar column.
+# Amasty Blog renders a post as .amblog-post-view containing the hero image
+# (.amblog-post-image) AND the body (.amblog-post-content) as siblings — so we
+# target the post wrapper, not just the text body, otherwise we lose the hero.
 DEFAULT_CONTENT_SELECTORS: tuple[str, ...] = (
+    # Amasty Blog post wrappers — include hero image + body together.
+    ".amblog-post-container",
+    ".amblog-post-view",
+    ".amblog-index-post",
+    "[data-amblog-js='post']",
+    # Magento CMS wrappers.
     ".cms-page-view .column.main",
     ".cms-content",
+    # Narrow fallbacks (text body only; hero image may be lost).
     ".amblog-post-content",
     "article .post-content",
     ".blog-post-content",
+    # Last resort: main column. These pull in sidebar siblings on two-column
+    # storefronts, which is why the strip list below has to be aggressive.
     ".page-main .column.main",
     "#maincontent .column.main",
     "main .column.main",
@@ -560,14 +575,33 @@ _CAPTURE_SCRIPT = r"""
     "header",".header",".page-header",".pwa-header",
     "footer",".footer",".page-footer",".pwa-footer",
     "nav",".nav",".navigation",".vertical-menu",
-    ".breadcrumbs",".breadcrumbs-root-o73",
+    // Breadcrumbs — CSS-module hashed class variants included.
+    ".breadcrumbs","[class*='breadcrumbs-root']","[class*='breadcrumbs_root']",
     ".modal-popup",".modal-slide",".modals-wrapper",
     ".loading-mask",".loader",
     ".minicart-wrapper",".block-search",".search-autocomplete",
     ".cookie-notice",".cookie-consent","#cookie-status",
     ".messages",".page.messages",
     ".page-title-wrapper",
+    // Generic Magento sidebar classes.
     ".sidebar",".sidebar-main",".sidebar-additional",
+    // Pricerite / PWA Studio style hashed sidebar + widget wrappers.
+    "[class*='sidebar-root']","[class*='sidebar_root']",
+    "[class*='sidebarRoot']",
+    "[class*='searchBlock']","[class*='search-root']","[class*='searchRoot']",
+    "[class*='favorites']","[class*='Favorites']",
+    "[class*='wishlist']","[class*='Wishlist']",
+    // Amasty Blog sidebar widgets. Any of these can appear as a sibling of
+    // the post when the page-main container is picked as the content root.
+    ".amblog-sidebar",".amblog-widget",".amblog-widget-container",
+    ".amblog-block-wrapper",".amblog-block",
+    ".amblog-widget-categories",".amblog-widget-search",
+    ".amblog-widget-tags",".amblog-widget-rss",
+    ".amblog-widget-recent",".amblog-widget-archive",
+    ".amblog-widget-featured",".amblog-widget-comment",
+    ".amblog-categories-list",".amblog-tags-list",
+    // Back-to-top, chat bubbles that sit at the content edge.
+    ".back-to-top","[class*='backToTop']","[class*='whatsapp']",
   ];
   for (const sel of STRIP) {
     clone.querySelectorAll(sel).forEach(n => n.remove());

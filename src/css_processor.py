@@ -140,7 +140,8 @@ UNWANTED_SELECTORS = [
     "meta",
     # Navigation and chrome
     ".breadcrumbs",
-    ".breadcrumbs-root-o73",
+    "[class*='breadcrumbs-root']",
+    "[class*='breadcrumbs_root']",
     "nav",
     ".nav",
     ".navigation",
@@ -160,10 +161,30 @@ UNWANTED_SELECTORS = [
     ".loading-mask",
     ".loader",
     ".page-title-wrapper",
-    # Sidebar
+    # Sidebar — Magento stock classes.
     ".sidebar",
     ".sidebar-main",
     ".sidebar-additional",
+    # Sidebar — Pricerite / PWA Studio hashed class variants.
+    "[class*='sidebar-root']",
+    "[class*='sidebar_root']",
+    "[class*='sidebarRoot']",
+    # Amasty Blog sidebar widgets (categories, search, tags, rss, recent).
+    ".amblog-sidebar",
+    ".amblog-widget",
+    ".amblog-widget-container",
+    ".amblog-block-wrapper",
+    ".amblog-block",
+    ".amblog-widget-categories",
+    ".amblog-widget-search",
+    ".amblog-widget-tags",
+    ".amblog-widget-rss",
+    ".amblog-widget-recent",
+    ".amblog-widget-archive",
+    ".amblog-widget-featured",
+    ".amblog-widget-comment",
+    ".amblog-categories-list",
+    ".amblog-tags-list",
     # Cookie/consent banners
     ".cookie-notice",
     ".cookie-consent",
@@ -171,11 +192,23 @@ UNWANTED_SELECTORS = [
     # Search
     ".block-search",
     ".search-autocomplete",
+    "[class*='searchBlock']",
+    "[class*='search-root']",
+    "[class*='searchRoot']",
+    # Favourites / wishlist widgets
+    "[class*='favorites']",
+    "[class*='Favorites']",
+    "[class*='wishlist']",
+    "[class*='Wishlist']",
     # Minicart
     ".minicart-wrapper",
     # Messages
     ".messages",
     ".page.messages",
+    # Floating buttons (chat, back-to-top)
+    ".back-to-top",
+    "[class*='backToTop']",
+    "[class*='whatsapp']",
 ]
 
 
@@ -771,41 +804,41 @@ def process_html_for_builder(html_content: str) -> str:
 
 /* --- BULLETPROOF PRODUCT TILES (BUILDER.IO FIX) --- */
 /* Stop Builder from turning every div into a vertical flex column */
-.migrated-live-content .galleryItemRoot div {
+.migrated-live-content .galleryItemRoot div {{
     display: block;
-}
+}}
 
 /* Force the product image wrapper to be a perfect square */
-.migrated-live-content .galleryItemImages {
+.migrated-live-content .galleryItemImages {{
     display: block !important;
     position: relative !important;
     width: 100% !important;
     padding-bottom: 100% !important; /* Forces 1:1 Aspect Ratio safely */
     overflow: hidden !important;
-}
+}}
 
 /* Lock the inner image container to the square */
-.migrated-live-content .galleryItemImages .imageRoot {
+.migrated-live-content .galleryItemImages .imageRoot {{
     position: absolute !important;
     top: 0 !important;
     left: 0 !important;
     width: 100% !important;
     height: 100% !important;
-}
+}}
 
 /* Force the actual image to scale properly without stretching */
-.migrated-live-content .galleryItemImages .imageRoot img {
+.migrated-live-content .galleryItemImages .imageRoot img {{
     position: absolute !important;
     top: 0 !important;
     left: 0 !important;
     width: 100% !important;
     height: 100% !important;
     object-fit: contain !important;
-}
+}}
 
 /* Fix Promo Badges (現金更抵, 折實價) so they overlay the image correctly */
 .migrated-live-content .galleryItemImages .item-mpLabel-cZu,
-.migrated-live-content .item-outOfStockLayer-bxQ {
+.migrated-live-content .item-outOfStockLayer-bxQ {{
     position: absolute !important;
     top: 0 !important;
     left: 0 !important;
@@ -814,26 +847,26 @@ def process_html_for_builder(html_content: str) -> str:
     flex-direction: column !important;
     align-items: flex-start !important;
     gap: 4px !important;
-}
+}}
 
 /* Fix Price and Delivery method horizontal alignment */
-.migrated-live-content .item-priceLogisticSection-FTm {
+.migrated-live-content .item-priceLogisticSection-FTm {{
     display: flex !important;
     flex-direction: row !important;
     justify-content: space-between !important;
     align-items: flex-end !important;
     width: 100% !important;
-}
-.migrated-live-content .logisticMethod {
+}}
+.migrated-live-content .logisticMethod {{
     display: flex !important;
     flex-direction: row !important;
     gap: 4px !important;
-}
+}}
 
 /* Stop Builder.io from forcing columns inside the tile */
-.migrated-live-content .galleryItemRoot {
+.migrated-live-content .galleryItemRoot {{
     display: block !important;
-}
+}}
 </style>"""
 
     body_html = str(soup)

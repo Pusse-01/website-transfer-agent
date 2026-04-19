@@ -20,8 +20,16 @@ logger = logging.getLogger(__name__)
 # fragments. Live capture already uses the same selectors for both page types;
 # this keeps the legacy HTML fallback aligned.
 _MAGENTO_CONTENT_SELECTORS: tuple[str, ...] = (
+    # Amasty Blog post wrappers come first so the hero image (rendered as a
+    # sibling of the body) is preserved alongside the post content.
+    ".amblog-post-container",
+    ".amblog-post-view",
+    ".amblog-index-post",
+    "[data-amblog-js='post']",
+    # Magento CMS wrappers.
     ".cms-page-view .column.main",
     ".cms-content",
+    # Narrow fallbacks (body text only; hero image may be dropped).
     ".amblog-post-content",
     ".amblog-content",
     "article .post-content",
@@ -29,6 +37,8 @@ _MAGENTO_CONTENT_SELECTORS: tuple[str, ...] = (
     ".post-content",
     "article .content",
     ".entry-content",
+    # Last resort: broad main columns. These may include the sidebar column,
+    # which is why _MAGENTO_UNWANTED_SELECTOR below is aggressive.
     ".page-main .column.main",
     "#maincontent .column.main",
     "main .column.main",
@@ -40,15 +50,28 @@ _MAGENTO_CONTENT_SELECTORS: tuple[str, ...] = (
 
 _MAGENTO_UNWANTED_SELECTOR = (
     "script, noscript, iframe, link, meta, "
-    ".breadcrumbs, .sidebar, .sidebar-main, .sidebar-additional, "
+    ".breadcrumbs, [class*='breadcrumbs-root'], [class*='breadcrumbs_root'], "
+    ".sidebar, .sidebar-main, .sidebar-additional, "
+    "[class*='sidebar-root'], [class*='sidebar_root'], [class*='sidebarRoot'], "
     "nav, .nav, .navigation, .vertical-menu, "
     "header, .header, .page-header, .pwa-header, "
     "footer, .footer, .page-footer, .pwa-footer, "
     ".page-title-wrapper, .modal-popup, .modal-slide, "
     ".modals-wrapper, .loading-mask, .loader, "
     ".minicart-wrapper, .block-search, .search-autocomplete, "
+    "[class*='searchBlock'], [class*='search-root'], [class*='searchRoot'], "
     ".cookie-notice, .cookie-consent, #cookie-status, "
-    ".messages, .page.messages"
+    ".messages, .page.messages, "
+    ".amblog-sidebar, .amblog-widget, .amblog-widget-container, "
+    ".amblog-block-wrapper, .amblog-block, "
+    ".amblog-widget-categories, .amblog-widget-search, "
+    ".amblog-widget-tags, .amblog-widget-rss, "
+    ".amblog-widget-recent, .amblog-widget-archive, "
+    ".amblog-widget-featured, .amblog-widget-comment, "
+    ".amblog-categories-list, .amblog-tags-list, "
+    "[class*='favorites'], [class*='Favorites'], "
+    "[class*='wishlist'], [class*='Wishlist'], "
+    ".back-to-top, [class*='backToTop'], [class*='whatsapp']"
 )
 
 
