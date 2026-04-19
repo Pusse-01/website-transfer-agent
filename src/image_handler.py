@@ -39,7 +39,7 @@ class ImageHandler:
         # Cache mapping: source_url -> builder_url
         self._upload_cache: dict[str, str] = {}
 
-    def download_image(self, image_url: str) -> Path | None:
+    def download_image(self, image_url: str, page_url: str = "") -> Path | None:
         """Download an image from a URL to local storage."""
         if not image_url:
             return None
@@ -50,18 +50,27 @@ class ImageHandler:
             if not filename:
                 filename = f"image_{hash(image_url) & 0xFFFFFFFF}.jpg"
 
-            # Sanitize filename
+            # Sanitize filename and deduplicate using a URL-based suffix so
+            # two different images with the same base name don't collide.
             filename = re.sub(r'[^\w\-_.]', '_', filename)
+            _url_hash = format(hash(image_url) & 0xFFFF, 'x')
+            name, _, ext = filename.rpartition('.')
+            filename = f"{name}_{_url_hash}.{ext}" if ext else f"{filename}_{_url_hash}"
             local_path = self.download_dir / filename
 
             if local_path.exists():
                 logger.debug(f"Image already downloaded: {filename}")
                 return local_path
 
-            # Send the image origin as Referer so basic hotlink-protection
-            # on the source site doesn't block the download.
-            parsed_ref = urlparse(image_url)
-            referer = f"{parsed_ref.scheme}://{parsed_ref.netloc}/"
+            # Use the page URL as Referer when available — CDN hotlink rules
+            # often check that the Referer matches the site domain AND the
+            # specific page. Falling back to just the origin root still passes
+            # most basic checks.
+            if page_url:
+                referer = page_url
+            else:
+                parsed_ref = urlparse(image_url)
+                referer = f"{parsed_ref.scheme}://{parsed_ref.netloc}/"
             response = self.session.get(
                 image_url, timeout=30, stream=True,
                 headers={"Referer": referer},
@@ -136,7 +145,7 @@ class ImageHandler:
             logger.error(f"Failed to upload {fname} to Builder.io: {e}")
             return None
 
-    def _resolve_and_upload_image(self, src: str, base_url: str) -> str | None:
+    def _resolve_and_upload_image(self, src: str, base_url: str, page_url: str = "") -> str | None:
         """Resolve a source image URL, download it, and upload to Builder.io.
 
         Returns the Builder.io URL on success, or None on failure.
@@ -151,7 +160,7 @@ class ImageHandler:
         if resolved in self._upload_cache:
             return self._upload_cache[resolved]
 
-        local_path = self.download_image(resolved)
+        local_path = self.download_image(resolved, page_url=page_url)
         if not local_path:
             return None
 
@@ -167,7 +176,7 @@ class ImageHandler:
         path = urlparse(url).path.lower()
         return any(path.endswith(ext) for ext in image_extensions)
 
-    def process_images_in_html(self, html_content: str, base_url: str = "") -> tuple[str, list[dict]]:
+    def process_images_in_html(self, html_content: str, base_url: str = "", page_url: str = "") -> tuple[str, list[dict]]:
         """
         Download all images in HTML content, upload to Builder.io,
         and replace image URLs in the HTML.
@@ -228,7 +237,7 @@ class ImageHandler:
             seen_img_srcs[resolved_src] = img
             original_src = src
 
-            builder_url = self._resolve_and_upload_image(src, base_url)
+            builder_url = self._resolve_and_upload_image(src, base_url, page_url=page_url)
             if builder_url:
                 img["src"] = builder_url
                 if img.get("data-src"):
@@ -306,6 +315,20 @@ class ImageHandler:
                 return match.group(0)
 
             style_tag.string = bg_pattern.sub(replace_style_bg_url, css_text)
+
+        # --- Pass 6: Stamp referrerpolicy on any <img> still pointing to an
+        #    external (non-Builder CDN) domain. Builder.io's renderer sends
+        #    "Referer: https://builder.io/" when fetching images, which most
+        #    hotlink-protection setups block as a foreign referrer.  With
+        #    referrerpolicy="no-referrer" the browser sends no Referer header
+        #    and CDNs that allow empty-referrer requests serve the image. ---
+        for img in soup.find_all("img"):
+            src = img.get("src", "")
+            if src and "cdn.builder.io" not in src:
+                if not img.get("referrerpolicy"):
+                    img["referrerpolicy"] = "no-referrer"
+                if not img.get("crossorigin"):
+                    img["crossorigin"] = "anonymous"
 
         return str(soup), image_mappings
 

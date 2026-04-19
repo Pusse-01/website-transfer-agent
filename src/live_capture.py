@@ -380,7 +380,12 @@ _CAROUSEL_CSS_FIXES = """\
 # (.amblog-post-image) AND the body (.amblog-post-content) as siblings — so we
 # target the post wrapper, not just the text body, otherwise we lose the hero.
 DEFAULT_CONTENT_SELECTORS: tuple[str, ...] = (
-    # Amasty Blog post wrappers — include hero image + body together.
+    # Pricerite / PWA Studio: blogDetail-blogPostItem wraps hero image
+    # (blogDetail-ImageBox) + article body. Sidebar widgets
+    # (blogDetail-normalBox) are siblings outside it, so this selector
+    # captures image+content without any sidebar.
+    "[class*='blogDetail-blogPostItem']",
+    # Generic Amasty Blog post wrappers — hero image + body together.
     ".amblog-post-container",
     ".amblog-post-view",
     ".amblog-index-post",
@@ -602,6 +607,10 @@ _CAPTURE_SCRIPT = r"""
     "[class*='postSidebar-']","[class*='PostSidebar-']",
     "[class*='shareButtons-']","[class*='socialShare-']",
     "[class*='relatedPosts-']","[class*='RelatedPosts-']",
+    // Pricerite blogDetail sidebar widget boxes (分類, 搜尋, 標籤, 我的收藏清單).
+    // These are siblings of blogDetail-blogPostItem inside blogDetail-blogMain.
+    // Strip them so they don't appear if a broader selector is ever used.
+    "[class*='blogDetail-normalBox']","[class*='blogDetail-normalHead']",
     // Amasty Blog sidebar widgets. Any of these can appear as a sibling of
     // the post when the page-main container is picked as the content root.
     ".amblog-sidebar",".amblog-widget",".amblog-widget-container",
@@ -924,6 +933,21 @@ _CAPTURE_SCRIPT = r"""
   const descEl = document.querySelector('meta[name="description"]');
   const metaTitleEl = document.querySelector('title');
 
+  // Best-effort og:image: use the meta tag first; then fall back to the first
+  // real <img> inside the captured post body (covers Pricerite's blog posts
+  // where the hero image is in blogDetail-ImageBox but there is no og:image).
+  let ogImage = ogImageEl ? ogImageEl.getAttribute("content") || "" : "";
+  if (!ogImage && root) {
+    const firstImg = root.querySelector("img");
+    if (firstImg) {
+      const candidateSrc = firstImg.src || firstImg.getAttribute("src") || "";
+      // Skip tiny data-URI placeholders (lazy-load stubs).
+      if (candidateSrc && !candidateSrc.startsWith("data:")) {
+        ogImage = candidateSrc;
+      }
+    }
+  }
+
   return {
     rootSelector: rootSelector,
     html: clone.outerHTML,
@@ -932,7 +956,7 @@ _CAPTURE_SCRIPT = r"""
     title: (document.querySelector('h1') && document.querySelector('h1').innerText.trim()) || (metaTitleEl ? metaTitleEl.innerText : ""),
     metaTitle: metaTitleEl ? metaTitleEl.innerText : "",
     metaDescription: descEl ? descEl.getAttribute("content") || "" : "",
-    ogImage: ogImageEl ? ogImageEl.getAttribute("content") || "" : "",
+    ogImage: ogImage,
     images: images,
   };
 })()

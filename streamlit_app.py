@@ -835,7 +835,9 @@ with tab_preview:
                             try:
                                 st.write("Uploading images to Builder.io CDN...")
                                 new_html, mappings = img_handler.process_images_in_html(
-                                    upload_data["html_content"], base_url=source_url
+                                    upload_data["html_content"],
+                                    base_url=source_url,
+                                    page_url=primary_url,
                                 )
                                 upload_data["html_content"] = new_html
                                 st.write(f"Uploaded {len(mappings)} image(s).")
@@ -1035,9 +1037,11 @@ with tab_preview:
                                     )
 
                                 try:
+                                    _page_url_b = page_data_b.get("primary_url") or source_url
                                     new_html, _ = img_handler.process_images_in_html(
                                         page_data_b["html_content"],
                                         base_url=source_url,
+                                        page_url=_page_url_b,
                                     )
                                     page_data_b["html_content"] = new_html
                                 except Exception as e:

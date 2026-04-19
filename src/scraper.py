@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 # fragments. Live capture already uses the same selectors for both page types;
 # this keeps the legacy HTML fallback aligned.
 _MAGENTO_CONTENT_SELECTORS: tuple[str, ...] = (
+    # Pricerite / PWA Studio: blogDetail-blogPostItem is the post column.
+    "[class*='blogDetail-blogPostItem']",
     # Amasty Blog post wrappers come first so the hero image (rendered as a
     # sibling of the body) is preserved alongside the post content.
     ".amblog-post-container",
@@ -71,7 +73,8 @@ _MAGENTO_UNWANTED_SELECTOR = (
     ".amblog-categories-list, .amblog-tags-list, "
     "[class*='favorites'], [class*='Favorites'], "
     "[class*='wishlist'], [class*='Wishlist'], "
-    ".back-to-top, [class*='backToTop'], [class*='whatsapp']"
+    ".back-to-top, [class*='backToTop'], [class*='whatsapp'], "
+    "[class*='blogDetail-normalBox'], [class*='blogDetail-normalHead']"
 )
 
 
