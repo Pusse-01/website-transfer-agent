@@ -11,9 +11,59 @@ import logging
 from urllib.parse import urljoin, urlparse
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 
 logger = logging.getLogger(__name__)
+
+
+# Shared HTML cleanup so blog posts and static CMS pages produce identical
+# fragments. Live capture already uses the same selectors for both page types;
+# this keeps the legacy HTML fallback aligned.
+_MAGENTO_CONTENT_SELECTORS: tuple[str, ...] = (
+    ".cms-page-view .column.main",
+    ".cms-content",
+    ".amblog-post-content",
+    ".amblog-content",
+    "article .post-content",
+    ".blog-post-content",
+    ".post-content",
+    "article .content",
+    ".entry-content",
+    ".page-main .column.main",
+    "#maincontent .column.main",
+    "main .column.main",
+    ".page-main",
+    "#maincontent",
+    "main",
+    "article",
+)
+
+_MAGENTO_UNWANTED_SELECTOR = (
+    "script, noscript, iframe, link, meta, "
+    ".breadcrumbs, .sidebar, .sidebar-main, .sidebar-additional, "
+    "nav, .nav, .navigation, .vertical-menu, "
+    "header, .header, .page-header, .pwa-header, "
+    "footer, .footer, .page-footer, .pwa-footer, "
+    ".page-title-wrapper, .modal-popup, .modal-slide, "
+    ".modals-wrapper, .loading-mask, .loader, "
+    ".minicart-wrapper, .block-search, .search-autocomplete, "
+    ".cookie-notice, .cookie-consent, #cookie-status, "
+    ".messages, .page.messages"
+)
+
+
+def _extract_main_html(soup: BeautifulSoup, selectors: tuple[str, ...]) -> str:
+    """Return the first matching content area with chrome + comments stripped."""
+    for selector in selectors:
+        el = soup.select_one(selector)
+        if not el:
+            continue
+        for unwanted in el.select(_MAGENTO_UNWANTED_SELECTOR):
+            unwanted.decompose()
+        for comment in el.find_all(string=lambda text: isinstance(text, Comment)):
+            comment.extract()
+        return str(el)
+    return ""
 
 
 class BlogScraper:
@@ -200,16 +250,19 @@ class BlogScraper:
         return {
             "title": post_data.get("title", ""),
             "html_content": html_content,
+            "content_heading": "",
             "thumbnail": thumbnail,
             "thumbnail_alt": post_data.get("post_thumbnail_alt", ""),
             "meta_title": post_data.get("meta_title", ""),
             "meta_description": post_data.get("meta_description", ""),
+            "meta_keywords": post_data.get("meta_tags", "") or "",
             "categories": post_data.get("categories", []),
             "tags": tags,
             "url_key": post_data.get("url_key", ""),
             "published_at": post_data.get("published_at", ""),
             "created_at": post_data.get("created_at", ""),
             "updated_at": post_data.get("updated_at", ""),
+            "page_layout": "",
             "images": self._extract_images_from_html(html_content),
             "source": "graphql",
             "page_type": "blog",
@@ -231,38 +284,27 @@ class BlogScraper:
         return result
 
     def _parse_html_post(self, soup: BeautifulSoup, url_key: str, url: str) -> dict:
-        """Parse blog post from HTML page."""
+        """Parse blog post from HTML page.
+
+        Uses the same content selectors and cleanup rules as the static CMS
+        page parser so both page types yield identical fragments.
+        """
         title = ""
-        for selector in ["h1.page-title", "h1.post-title", "h1.amblog-title", ".amblog-post-title", "h1"]:
+        for selector in [
+            "h1.page-title span",
+            "h1.page-title",
+            ".page-title-wrapper h1",
+            "h1.post-title",
+            "h1.amblog-title",
+            ".amblog-post-title",
+            "h1",
+        ]:
             el = soup.select_one(selector)
             if el:
                 title = el.get_text(strip=True)
                 break
 
-        html_content = ""
-        for selector in [
-            ".amblog-post-content",
-            ".amblog-content",
-            ".post-content",
-            ".blog-post-content",
-            "article .content",
-            ".entry-content",
-            "article",
-        ]:
-            el = soup.select_one(selector)
-            if el:
-                # Remove non-content elements
-                for unwanted in el.select("script, noscript, iframe, link, meta, nav, .nav, header, footer"):
-                    unwanted.decompose()
-                html_content = str(el)
-                break
-
-        if not html_content:
-            main = soup.select_one("main") or soup.select_one("#maincontent")
-            if main:
-                for unwanted in main.select("script, noscript, iframe, link, meta, nav, .nav, header, footer"):
-                    unwanted.decompose()
-                html_content = str(main)
+        html_content = _extract_main_html(soup, _MAGENTO_CONTENT_SELECTORS)
 
         thumbnail = ""
         for selector in [
@@ -287,16 +329,24 @@ class BlogScraper:
         if soup.title:
             meta_title = soup.title.string or ""
 
+        meta_keywords = ""
+        kw_el = soup.select_one('meta[name="keywords"]')
+        if kw_el:
+            meta_keywords = kw_el.get("content", "")
+
         return {
             "title": title,
             "html_content": html_content,
+            "content_heading": "",
             "thumbnail": thumbnail,
             "meta_title": meta_title,
             "meta_description": meta_desc,
+            "meta_keywords": meta_keywords,
             "categories": [],
             "tags": [],
             "url_key": url_key,
             "published_at": "",
+            "page_layout": "",
             "images": self._extract_images_from_html(html_content),
             "source": "html",
         }
@@ -464,39 +514,9 @@ class StaticPageScraper:
                 title = el.get_text(strip=True)
                 break
 
-        # Main content area - try CMS-specific selectors first
-        html_content = ""
-        for selector in [
-            ".cms-page-view .column.main",
-            ".cms-content",
-            ".page-main .column.main",
-            "#maincontent .column.main",
-            ".page-main",
-            "#maincontent",
-            "main",
-        ]:
-            el = soup.select_one(selector)
-            if el:
-                # Remove all non-content elements aggressively
-                for unwanted in el.select(
-                    "script, noscript, iframe, link, meta, "
-                    ".breadcrumbs, .sidebar, .sidebar-main, .sidebar-additional, "
-                    "nav, .nav, .navigation, .vertical-menu, "
-                    "header, .header, .page-header, .pwa-header, "
-                    "footer, .footer, .page-footer, .pwa-footer, "
-                    ".page-title-wrapper, .modal-popup, .modal-slide, "
-                    ".modals-wrapper, .loading-mask, .loader, "
-                    ".minicart-wrapper, .block-search, .search-autocomplete, "
-                    ".cookie-notice, .cookie-consent, #cookie-status, "
-                    ".messages, .page.messages"
-                ):
-                    unwanted.decompose()
-                # Also remove HTML comments
-                from bs4 import Comment
-                for comment in el.find_all(string=lambda text: isinstance(text, Comment)):
-                    comment.extract()
-                html_content = str(el)
-                break
+        # Main content area — shared selectors + cleanup with the blog parser
+        # so static pages and blog posts yield identical fragments.
+        html_content = _extract_main_html(soup, _MAGENTO_CONTENT_SELECTORS)
 
         # Extract thumbnail / hero image
         thumbnail = ""
@@ -524,6 +544,7 @@ class StaticPageScraper:
         return {
             "title": title,
             "html_content": html_content,
+            "content_heading": "",
             "thumbnail": thumbnail,
             "meta_title": meta_title,
             "meta_description": meta_desc,
@@ -532,6 +553,7 @@ class StaticPageScraper:
             "categories": [],
             "tags": [],
             "published_at": "",
+            "page_layout": "",
             "images": self._extract_images_from_html(html_content),
             "source": "html",
             "page_type": "static",
