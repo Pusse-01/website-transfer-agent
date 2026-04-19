@@ -837,7 +837,7 @@ with tab_preview:
                                 new_html, mappings = img_handler.process_images_in_html(
                                     upload_data["html_content"],
                                     base_url=source_url,
-                                    page_url=primary_url,
+                                    page_url=upload_data.get("primary_url", source_url),
                                 )
                                 upload_data["html_content"] = new_html
                                 st.write(f"Uploaded {len(mappings)} image(s).")
