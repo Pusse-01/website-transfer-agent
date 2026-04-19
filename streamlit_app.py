@@ -422,8 +422,8 @@ with tab_preview:
         pages = st.session_state.loaded_pages
         if pages:
             page_labels = [
-                f"[{p.get('page_type', '?').upper()}] {p.get('title', p.get('url_key', 'Unknown'))}"
-                for p in pages
+                f"{i+1}. [{p.get('page_type', '?').upper()}] {p.get('title', p.get('url_key', 'Unknown'))}"
+                for i, p in enumerate(pages)
             ]
 
             selected_idx = st.selectbox(
