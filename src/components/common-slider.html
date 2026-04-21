@@ -1,0 +1,951 @@
+<!--
+  Common Slider (zero dependency)
+
+  Usage:
+    <div
+      class="cs-slider"
+      data-slider-url="/slides.json"
+      data-items-per-view="5"
+      data-gap="16px"
+      data-title="Featured"
+    ></div>
+
+  Notes:
+  - Works with multiple instances per page.
+  - Dispatches `common-slider:add-to-cart` event when CTA is clicked.
+-->
+
+<style>
+  .cs-slider {
+    --cs-items-per-view: 5;
+    --cs-gap: 16px;
+    --cs-radius: 12px;
+    --cs-border: rgba(0, 0, 0, 0.08);
+    --cs-muted: rgba(0, 0, 0, 0.55);
+    --cs-text: #111;
+    --cs-accent: #f48120;
+    --cs-tag-green: #50b748;
+    --cs-tag-green-border: #409239;
+    --cs-bg: #fff;
+    --cs-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+
+    color: var(--cs-text);
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .cs-slider * {
+    box-sizing: border-box;
+  }
+
+  .cs-shell {
+    display: grid;
+    gap: 10px;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .cs-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .cs-title {
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.2;
+    margin: 0;
+  }
+
+  .cs-nav {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .cs-arrow {
+    appearance: none;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    background: #000;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+    color: #fff;
+    width: 36px;
+    height: 36px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+  }
+  .cs-arrow[disabled] {
+    opacity: 0.45;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+  .cs-arrow svg {
+    width: 20px;
+    height: 20px;
+  }
+  .cs-arrowText {
+    display: inline-block;
+    font-size: 22px;
+    line-height: 1;
+    font-weight: 900;
+    transform: translateY(-1px);
+    user-select: none;
+  }
+  .cs-arrow:hover:not([disabled]) {
+    background: #000;
+  }
+  .cs-arrow:active:not([disabled]) {
+    transform: translateY(0.5px);
+  }
+  .cs-arrow:focus-visible {
+    outline: 3px solid rgba(80, 183, 72, 0.35);
+    outline-offset: 2px;
+  }
+
+  .cs-viewport {
+    position: relative;
+    width: 100%;
+    max-width: 100%;
+    overflow: hidden; /* prevents page-level horizontal scroll */
+  }
+
+  .cs-track {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: calc(
+      (100% - (var(--cs-items-per-view) - 1) * var(--cs-gap)) / var(--cs-items-per-view)
+    );
+    gap: var(--cs-gap);
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 2px 2px 10px 2px;
+    scroll-snap-type: x mandatory;
+    scroll-padding: 2px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    width: 100%;
+    max-width: 100%;
+  }
+  .cs-track::-webkit-scrollbar {
+    display: none;
+  }
+  .cs-track:focus-visible {
+    outline: 3px solid rgba(80, 183, 72, 0.35);
+    outline-offset: 4px;
+    border-radius: 10px;
+  }
+
+  .cs-slide {
+    scroll-snap-align: start;
+    min-width: 0;
+  }
+
+  .cs-sideArrows {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 6px;
+    pointer-events: none;
+  }
+
+  .cs-sideArrows .cs-arrow {
+    pointer-events: auto;
+  }
+
+  .cs-card {
+    height: 100%;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    background: var(--cs-bg);
+    border: 1px solid var(--cs-border);
+    border-radius: var(--cs-radius);
+    overflow: hidden;
+  }
+
+  .cs-cardLink {
+    color: inherit;
+    text-decoration: none;
+    display: block;
+  }
+
+  .cs-media {
+    position: relative;
+    background: #fff;
+    aspect-ratio: 1 / 1;
+    display: grid;
+    place-items: center;
+  }
+
+  .cs-media img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+    background: transparent;
+  }
+
+  .cs-imgSecondary {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity 160ms ease;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .cs-card:hover .cs-imgSecondary {
+      opacity: 1;
+    }
+  }
+
+  .cs-pill {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-weight: 800;
+    font-size: 14px;
+    letter-spacing: 0.2px;
+    color: #fff;
+    background: var(--cs-tag-green);
+    border: 2px solid var(--cs-tag-green-border);
+    line-height: 1;
+    user-select: none;
+  }
+
+  .cs-kebab {
+    position: absolute;
+    right: 10px;
+    top: 10px;
+    width: 34px;
+    height: 34px;
+    border-radius: 999px;
+    border: 0;
+    background: rgba(0, 0, 0, 0.62);
+    color: #fff;
+    display: grid;
+    place-items: center;
+    cursor: default;
+  }
+  .cs-kebab svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .cs-body {
+    padding: 12px 12px 14px 12px;
+    display: grid;
+    gap: 8px;
+    align-content: start;
+  }
+
+  .cs-brand {
+    font-size: 12px;
+    color: var(--cs-muted);
+    font-weight: 700;
+  }
+
+  .cs-name {
+    font-size: 14px;
+    font-weight: 900;
+    line-height: 1.25;
+    display: -webkit-box;
+    line-clamp: 2;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    min-height: calc(1.25em * 2);
+  }
+
+  .cs-priceRow {
+    margin-top: 2px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .cs-prices {
+    display: grid;
+    gap: 4px;
+  }
+
+  .cs-oldPrice {
+    color: rgba(0, 0, 0, 0.35);
+    font-size: 13px;
+    text-decoration: line-through;
+    text-decoration-thickness: 2px;
+    text-decoration-color: rgba(0, 0, 0, 0.35);
+  }
+
+  .cs-currentPrice {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-weight: 900;
+    color: var(--cs-accent);
+    line-height: 1;
+  }
+
+  .cs-prefix {
+    font-size: 10px;
+    font-weight: 900;
+    color: #f48120 !important;
+    white-space: nowrap;
+  }
+
+  .cs-currentPriceValue {
+    font-size: 18px;
+    letter-spacing: 0.2px;
+    white-space: nowrap;
+    color: #f48120 !important;
+  }
+
+  .cs-cta {
+    appearance: none;
+    border: 1px solid rgba(0, 0, 0, 0.14);
+    background: #fff;
+    color: #1b5e20;
+    width: 42px;
+    height: 34px;
+    border-radius: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  .cs-cta svg {
+    width: 22px;
+    height: 22px;
+  }
+  .cs-cta:focus-visible {
+    outline: 3px solid rgba(80, 183, 72, 0.35);
+    outline-offset: 2px;
+  }
+
+  .cs-stockOverlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 12px;
+    background: transparent;
+    pointer-events: none;
+  }
+  .cs-oos .cs-stockOverlay {
+    display: flex;
+  }
+  .cs-stockPill {
+    background: rgba(0, 0, 0, 0.68);
+    color: #fff;
+    font-weight: 800;
+    font-size: 13px;
+    border-radius: 999px;
+    padding: 8px 12px;
+    line-height: 1;
+  }
+
+  .cs-dots {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    padding: 6px 0 0 0;
+  }
+
+  .cs-dot {
+    appearance: none;
+    border: 0;
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.2);
+    cursor: pointer;
+    padding: 0;
+  }
+  .cs-dot[aria-current="true"] {
+    width: 22px;
+    background: rgba(0, 0, 0, 0.55);
+  }
+  .cs-dot:focus-visible {
+    outline: 3px solid rgba(80, 183, 72, 0.35);
+    outline-offset: 3px;
+  }
+
+  .cs-status {
+    font-size: 14px;
+    color: var(--cs-muted);
+    padding: 10px 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cs-imgSecondary {
+      transition: none;
+    }
+  }
+
+  /* Mobile responsiveness */
+  @media (max-width: 640px) {
+    .cs-slider {
+      --cs-gap: 12px;
+      --cs-radius: 12px;
+    }
+
+    .cs-topbar {
+      align-items: flex-start;
+    }
+
+    .cs-title {
+      font-size: 16px;
+    }
+
+    /* Rely on swipe on touch devices; arrows can obscure content on narrow screens */
+    .cs-sideArrows {
+      display: none;
+    }
+
+    .cs-track {
+      padding-bottom: 12px;
+      scroll-snap-type: x proximity;
+    }
+
+    .cs-pill {
+      left: 8px;
+      bottom: 8px;
+      font-size: 12px;
+      padding: 6px 9px;
+    }
+
+    .cs-body {
+      padding: 10px 10px 12px 10px;
+    }
+
+    .cs-currentPriceValue {
+      font-size: 16px;
+    }
+  }
+</style>
+
+<script>
+  (function () {
+    "use strict";
+
+    var NS = "CommonSlider";
+    var EVENT_ADD_TO_CART = "common-slider:add-to-cart";
+
+    function toInt(value, fallback) {
+      var n = Number.parseInt(String(value || ""), 10);
+      return Number.isFinite(n) ? n : fallback;
+    }
+
+    function getCssLength(value, fallback) {
+      var v = String(value || "").trim();
+      return v ? v : fallback;
+    }
+
+    function prefersReducedMotion() {
+      return (
+        typeof window !== "undefined" &&
+        window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      );
+    }
+
+    function formatMoney(currency, amount) {
+      try {
+        var n = Number(amount);
+        if (!Number.isFinite(n)) return "";
+        return new Intl.NumberFormat(undefined, {
+          style: "currency",
+          currency: currency || "HKD",
+          currencyDisplay: "symbol",
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        }).format(n);
+      } catch (e) {
+        var n2 = Number(amount);
+        if (!Number.isFinite(n2)) return "";
+        return String(currency || "HKD") + " " + n2.toFixed(2);
+      }
+    }
+
+    function el(tag, attrs, children) {
+      var node = document.createElement(tag);
+      if (attrs) {
+        for (var k in attrs) {
+          if (!Object.prototype.hasOwnProperty.call(attrs, k)) continue;
+          if (k === "class") node.className = attrs[k];
+          else if (k === "text") node.textContent = attrs[k];
+          else if (k === "html") node.innerHTML = attrs[k];
+          else if (k.startsWith("on") && typeof attrs[k] === "function") {
+            node.addEventListener(k.slice(2), attrs[k]);
+          } else if (attrs[k] === null || typeof attrs[k] === "undefined") {
+            continue;
+          } else {
+            node.setAttribute(k, String(attrs[k]));
+          }
+        }
+      }
+      if (Array.isArray(children)) {
+        for (var i = 0; i < children.length; i++) {
+          var c = children[i];
+          if (c === null || typeof c === "undefined") continue;
+          node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+        }
+      }
+      return node;
+    }
+
+    function clamp(v, min, max) {
+      return Math.max(min, Math.min(max, v));
+    }
+
+    function safeUrl(u) {
+      if (!u) return "#";
+      try {
+        return String(u);
+      } catch (e) {
+        return "#";
+      }
+    }
+
+    function normalizeTagColor(color) {
+      var c = String(color || "").trim().toLowerCase();
+      if (!c) return { bg: "var(--cs-tag-green)", border: "var(--cs-tag-green-border)" };
+      if (c === "green") return { bg: "var(--cs-tag-green)", border: "var(--cs-tag-green-border)" };
+      if (c === "orange") return { bg: "#ff8a3d", border: "#e96f20" };
+      if (c === "red") return { bg: "#e53935", border: "#c62828" };
+      if (c === "blue") return { bg: "#1976d2", border: "#115293" };
+      return { bg: c, border: c };
+    }
+
+    function buildIconChevron(dir) {
+      return el(
+        "span",
+        { class: "cs-arrowText", "aria-hidden": "true", text: dir === "left" ? "<" : ">" },
+        []
+      );
+    }
+
+    function buildIconDots() {
+      return el(
+        "svg",
+        { viewBox: "0 0 24 24", "aria-hidden": "true", focusable: "false" },
+        [
+          el("path", {
+            d: "M16,12A2,2 0 0,1 18,10A2,2 0 0,1 20,12A2,2 0 0,1 18,14A2,2 0 0,1 16,12M10,12A2,2 0 0,1 12,10A2,2 0 0,1 14,12A2,2 0 0,1 12,14A2,2 0 0,1 10,12M4,12A2,2 0 0,1 6,10A2,2 0 0,1 8,12A2,2 0 0,1 6,14A2,2 0 0,1 4,12Z",
+            fill: "currentColor",
+          }),
+        ]
+      );
+    }
+
+    function buildIconCart() {
+      return el(
+        "svg",
+        { viewBox: "0 0 24 24", "aria-hidden": "true", focusable: "false" },
+        [
+          el("path", {
+            d: "M7 18c-1.1 0-1.99.9-1.99 2S5.9 22 7 22s2-.9 2-2-.9-2-2-2Zm10 0c-1.1 0-1.99.9-1.99 2S15.9 22 17 22s2-.9 2-2-.9-2-2-2ZM7.17 14h9.66c.75 0 1.41-.41 1.75-1.03L21 7H6.21L5.27 4H2v2h2l3.6 7.59-1.35 2.44C5.52 17.37 6.48 19 8 19h12v-2H8l1.1-2ZM6.96 9h11.17l-1.1 3H8.36L6.96 9Z",
+            fill: "currentColor",
+          }),
+        ]
+      );
+    }
+
+    function buildCard(item) {
+      var url = safeUrl(item && item.url);
+      var primary = item && item.image && item.image.primary;
+      var secondary = item && item.image && item.image.secondary;
+      var alt = (item && item.image && item.image.alt) || (item && item.title) || "";
+
+      var tag = item && Array.isArray(item.tags) && item.tags.length ? item.tags[0] : null;
+      var tagColor = normalizeTagColor(tag && tag.color);
+
+      var brand = (item && item.brand) || "";
+      var title = (item && item.title) || "";
+
+      var currency = item && item.price && item.price.currency;
+      var current = item && item.price && item.price.current;
+      var original = item && item.price && item.price.original;
+      var prefix = item && item.price && item.price.prefix;
+
+      var showOld = Number.isFinite(Number(original)) && Number(original) > Number(current);
+
+      var isOos = !!(item && item.stock && item.stock.isOutOfStock);
+      var stockLabel = (item && item.stock && item.stock.label) || "Out of stock";
+
+      var hasCta = item && item.cta && item.cta.type === "add_to_cart";
+
+      var mediaChildren = [
+        el("img", { src: primary || "", alt: alt, loading: "lazy" }),
+        secondary
+          ? el("img", {
+              class: "cs-imgSecondary",
+              src: secondary,
+              alt: alt,
+              loading: "lazy",
+            })
+          : null,
+        tag && tag.label
+          ? el("span", {
+              class: "cs-pill",
+              text: String(tag.label),
+              style: "background:" + tagColor.bg + ";border-color:" + tagColor.border + ";",
+            })
+          : null,
+        el("div", { class: "cs-kebab", "aria-hidden": "true" }, [buildIconDots()]),
+        el("div", { class: "cs-stockOverlay" }, [
+          el("div", { class: "cs-stockPill", text: String(stockLabel) }),
+        ]),
+      ];
+
+      var card = el("div", { class: "cs-card" }, [
+        el("a", { class: "cs-cardLink", href: url }, [
+          el("div", { class: "cs-media" }, mediaChildren),
+        ]),
+        el("div", { class: "cs-body" }, [
+          el("div", { class: "cs-brand", text: brand }),
+          el("a", { class: "cs-cardLink", href: url }, [el("div", { class: "cs-name", text: title })]),
+          el("div", { class: "cs-priceRow" }, [
+            el("div", { class: "cs-prices" }, [
+              showOld ? el("div", { class: "cs-oldPrice", text: formatMoney(currency, original) }) : null,
+              el("div", { class: "cs-currentPrice" }, [
+                prefix ? el("span", { class: "cs-prefix", text: String(prefix) }) : null,
+                el("span", { class: "cs-currentPriceValue", text: formatMoney(currency, current) }),
+              ]),
+            ]),
+            hasCta
+              ? el(
+                  "button",
+                  {
+                    class: "cs-cta",
+                    type: "button",
+                    "aria-label": (item.cta && item.cta.label) || "Add to cart",
+                    onclick: function (e) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      window.dispatchEvent(
+                        new CustomEvent(EVENT_ADD_TO_CART, {
+                          detail: { item: item },
+                        })
+                      );
+                    },
+                  },
+                  [buildIconCart()]
+                )
+              : null,
+          ]),
+        ]),
+      ]);
+
+      if (isOos) card.classList.add("cs-oos");
+      return card;
+    }
+
+    function computePageOffsets(track, itemsPerView) {
+      var slidesCount = track.children.length;
+      var pages = Math.max(1, Math.ceil(slidesCount / itemsPerView));
+      var offsets = [];
+      for (var p = 0; p < pages; p++) {
+        var idx = p * itemsPerView;
+        var child = track.children[idx];
+        offsets.push(child ? child.offsetLeft : 0);
+      }
+      return offsets;
+    }
+
+    function nearestIndexByOffset(offsets, scrollLeft) {
+      if (!offsets.length) return 0;
+      var best = 0;
+      var bestDist = Math.abs(scrollLeft - offsets[0]);
+      for (var i = 1; i < offsets.length; i++) {
+        var d = Math.abs(scrollLeft - offsets[i]);
+        if (d < bestDist) {
+          best = i;
+          bestDist = d;
+        }
+      }
+      return best;
+    }
+
+    function scrollToPage(track, left) {
+      if (prefersReducedMotion()) {
+        track.scrollLeft = left;
+        return;
+      }
+      track.scrollTo({ left: left, behavior: "smooth" });
+    }
+
+    function initSlider(root, options) {
+      if (!root || root.__csInitialized) return;
+      root.__csInitialized = true;
+
+      var sliderUrl = (options && options.url) || root.getAttribute("data-slider-url");
+      var sliderJsonAttr = (options && options.json) || root.getAttribute("data-slider-json");
+      var inlineJsonScript = root.querySelector('script[type="application/json"]');
+      var inlineJsonText = inlineJsonScript ? inlineJsonScript.textContent : "";
+      var desktopItemsPerView = toInt(
+        (options && options.itemsPerView) || root.getAttribute("data-items-per-view"),
+        5
+      );
+      desktopItemsPerView = clamp(desktopItemsPerView, 1, 12);
+
+      var tabletItemsPerView = toInt(
+        (options && options.itemsPerViewTablet) || root.getAttribute("data-items-per-view-tablet"),
+        Math.min(3, desktopItemsPerView)
+      );
+      tabletItemsPerView = clamp(tabletItemsPerView, 1, 12);
+
+      var mobileItemsPerView = toInt(
+        (options && options.itemsPerViewMobile) || root.getAttribute("data-items-per-view-mobile"),
+        Math.min(2, desktopItemsPerView)
+      );
+      mobileItemsPerView = clamp(mobileItemsPerView, 1, 12);
+
+      var gap = getCssLength((options && options.gap) || root.getAttribute("data-gap"), "16px");
+      var titleText = (options && options.title) || root.getAttribute("data-title") || "";
+
+      root.style.setProperty("--cs-gap", gap);
+
+      var shell = el("div", { class: "cs-shell" });
+      var titleNode = titleText ? el("h3", { class: "cs-title", text: titleText }) : el("div");
+
+      var prevBtn = el(
+        "button",
+        { class: "cs-arrow", type: "button", "aria-label": "Previous", disabled: "true" },
+        [buildIconChevron("left")]
+      );
+      var nextBtn = el("button", { class: "cs-arrow", type: "button", "aria-label": "Next" }, [
+        buildIconChevron("right"),
+      ]);
+
+      var topbar = el("div", { class: "cs-topbar" }, [titleNode]);
+
+      var track = el("div", {
+        class: "cs-track",
+        tabindex: "0",
+        role: "region",
+        "aria-label": titleText ? titleText : "Slider",
+      });
+
+      var sideArrows = el("div", { class: "cs-sideArrows", "aria-hidden": "true" }, [
+        prevBtn,
+        nextBtn,
+      ]);
+      var viewport = el("div", { class: "cs-viewport" }, [track, sideArrows]);
+      var dots = el("div", { class: "cs-dots", role: "tablist", "aria-label": "Slider pages" });
+      var status = el("div", { class: "cs-status", text: "Loading…" });
+      var pageOffsets = [];
+      var itemsPerView = desktopItemsPerView;
+
+      function computeItemsPerView() {
+        if (typeof window === "undefined" || !window.matchMedia) return desktopItemsPerView;
+        if (window.matchMedia("(max-width: 640px)").matches) return mobileItemsPerView;
+        if (window.matchMedia("(max-width: 1024px)").matches) return tabletItemsPerView;
+        return desktopItemsPerView;
+      }
+
+      function applyItemsPerView(next) {
+        itemsPerView = clamp(toInt(next, desktopItemsPerView), 1, 12);
+        root.style.setProperty("--cs-items-per-view", String(itemsPerView));
+      }
+
+      shell.appendChild(topbar);
+      shell.appendChild(viewport);
+      shell.appendChild(dots);
+      shell.appendChild(status);
+
+      root.innerHTML = "";
+      root.appendChild(shell);
+
+      applyItemsPerView(computeItemsPerView());
+
+      function setStatus(message) {
+        status.textContent = message || "";
+        status.style.display = message ? "block" : "none";
+      }
+
+      function normalizeDataShape(parsed) {
+        if (Array.isArray(parsed)) return parsed;
+        if (parsed && typeof parsed === "object" && Array.isArray(parsed.items)) return parsed.items;
+        return null;
+      }
+
+      function parseInlineData() {
+        var jsonText = "";
+        if (typeof sliderJsonAttr === "string" && sliderJsonAttr.trim()) jsonText = sliderJsonAttr;
+        else if (typeof inlineJsonText === "string" && inlineJsonText.trim()) jsonText = inlineJsonText;
+        if (!jsonText) return null;
+
+        try {
+          var parsed = JSON.parse(jsonText);
+          return normalizeDataShape(parsed);
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function setArrowState() {
+        var maxScroll = track.scrollWidth - track.clientWidth;
+        var atStart = track.scrollLeft <= 1;
+        var atEnd = track.scrollLeft >= maxScroll - 1;
+        prevBtn.disabled = atStart;
+        nextBtn.disabled = atEnd || maxScroll <= 1;
+      }
+
+      function rebuildDots() {
+        dots.innerHTML = "";
+        pageOffsets = computePageOffsets(track, itemsPerView);
+        var pages = Math.max(1, pageOffsets.length);
+        for (var i = 0; i < pages; i++) {
+          (function (pageIndex) {
+            var b = el("button", {
+              class: "cs-dot",
+              type: "button",
+              role: "tab",
+              "aria-label": "Go to page " + (pageIndex + 1),
+              "aria-current": "false",
+              onclick: function () {
+                scrollToPage(track, pageOffsets[pageIndex] || 0);
+              },
+            });
+            dots.appendChild(b);
+          })(i);
+        }
+        updateActiveDot();
+      }
+
+      function updateActiveDot() {
+        var pages = Math.max(1, pageOffsets.length || 1);
+        var active = nearestIndexByOffset(pageOffsets, track.scrollLeft);
+        var children = dots.children;
+        for (var i = 0; i < children.length; i++) {
+          children[i].setAttribute("aria-current", i === active ? "true" : "false");
+        }
+        setArrowState();
+        if (pages <= 1) {
+          dots.style.display = "none";
+        } else {
+          dots.style.display = "flex";
+        }
+      }
+
+      function scrollByPage(dir) {
+        var pages = Math.max(1, pageOffsets.length || 1);
+        var current = nearestIndexByOffset(pageOffsets, track.scrollLeft);
+        var next = clamp(current + dir, 0, pages - 1);
+        scrollToPage(track, pageOffsets[next] || 0);
+      }
+
+      prevBtn.addEventListener("click", function () {
+        scrollByPage(-1);
+      });
+      nextBtn.addEventListener("click", function () {
+        scrollByPage(1);
+      });
+
+      track.addEventListener("scroll", function () {
+        window.requestAnimationFrame(updateActiveDot);
+      });
+
+      track.addEventListener("keydown", function (e) {
+        if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          scrollByPage(-1);
+        }
+        if (e.key === "ArrowRight") {
+          e.preventDefault();
+          scrollByPage(1);
+        }
+      });
+
+      var resizeTimer = 0;
+      window.addEventListener("resize", function () {
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(function () {
+          var nextItems = computeItemsPerView();
+          if (nextItems !== itemsPerView) applyItemsPerView(nextItems);
+          rebuildDots();
+          setArrowState();
+        }, 120);
+      });
+
+      async function load() {
+        try {
+          setStatus("Loading…");
+
+          var data = parseInlineData();
+          if (!data) {
+            if (!sliderUrl) {
+              setStatus("Provide data-slider-url or inline JSON (data-slider-json / <script type=\"application/json\">).");
+              prevBtn.disabled = true;
+              nextBtn.disabled = true;
+              dots.style.display = "none";
+              return;
+            }
+
+            var res = await fetch(sliderUrl, { credentials: "same-origin" });
+            if (!res.ok) throw new Error("Request failed (" + res.status + ")");
+            var fetched = await res.json();
+            data = normalizeDataShape(fetched);
+          }
+
+          if (!Array.isArray(data)) throw new Error("JSON must be an array");
+
+          track.innerHTML = "";
+          for (var i = 0; i < data.length; i++) {
+            var item = data[i];
+            if (!item || typeof item !== "object") continue;
+            var slide = el("div", { class: "cs-slide", role: "group" }, [buildCard(item)]);
+            track.appendChild(slide);
+          }
+
+          if (!data.length) {
+            setStatus("No items.");
+          } else {
+            setStatus("");
+          }
+
+          rebuildDots();
+          setArrowState();
+        } catch (err) {
+          setStatus("Couldn’t load slider data.");
+          prevBtn.disabled = true;
+          nextBtn.disabled = true;
+          dots.style.display = "none";
+        }
+      }
+
+      load();
+    }
+
+    function initAll() {
+      var nodes = document.querySelectorAll(".cs-slider");
+      for (var i = 0; i < nodes.length; i++) initSlider(nodes[i]);
+    }
+
+    window[NS] = window[NS] || {};
+    window[NS].init = initSlider;
+    window[NS].initAll = initAll;
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", initAll);
+    } else {
+      initAll();
+    }
+  })();
+</script>
