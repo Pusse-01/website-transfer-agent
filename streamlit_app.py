@@ -465,7 +465,7 @@ with tab_preview:
                     if page_type == "blog":
                         primary_url = f"{source_url.rstrip('/')}{blog_path}{url_key}"
                     else:
-                        primary_url = f"{source_url.rstrip('/')}/{url_key}"
+                        primary_url = f"{source_url.rstrip('/')}/hk/zh/{url_key}"
 
                 post_data = None
                 captured_live = False
@@ -655,7 +655,7 @@ with tab_preview:
                             if page_type_b == "blog":
                                 primary_url_b = f"{source_url.rstrip('/')}{blog_path}{url_key_b}"
                             else:
-                                primary_url_b = f"{source_url.rstrip('/')}/{url_key_b}"
+                                primary_url_b = f"{source_url.rstrip('/')}/hk/zh/{url_key_b}"
 
                         batch_status.markdown(
                             f"**[{count}/{len(picked)}]** Scraping `{url_key_b}`..."
@@ -925,7 +925,7 @@ with tab_preview:
                         post_data.get("primary_url")
                         or (f"{source_url.rstrip('/')}{blog_path}{preview_key}"
                             if post_data.get("page_type") == "blog"
-                            else f"{source_url.rstrip('/')}/{preview_key}")
+                            else f"{source_url.rstrip('/')}/hk/zh/{preview_key}")
                     )
                     with st.spinner("Screenshotting and asking the model..."):
                         refine_result = refine_layout_with_screenshots(

@@ -7,29 +7,166 @@ pipeline strips <script> tags (Builder.io blocks them in Custom Code
 blocks), so the tiles arrive at Builder.io as empty image shells.
 
 This module detects product carousels in the scraped HTML and replaces
-them with self-contained, static HTML+CSS tiles that mimic the original
-look using the data we CAN extract from the DOM at capture time (image
-URL, product URL, brand, title, badges, and any visible prices).
+them with the common-slider (cs-slider) component — a zero-dependency
+product carousel that works natively in Builder.io Custom Code blocks.
+Product data is serialised to JSON and embedded inline in the HTML so
+no external data-fetch is required at render time.
 
 Pipeline position: run AFTER live_capture has produced the raw fragment
 but BEFORE the final <style>/reinit-script wrapper is appended.  Also
 run as the first step of css_processor.process_html_for_builder so the
 legacy scraper path benefits too.
-
-The rebuilt tiles use inline styles only — no external CSS class
-dependencies — so Builder.io's Custom Code container can't restyle them
-by accident.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 from typing import Iterable
 
 from bs4 import BeautifulSoup, Tag
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Common-slider component loader
+#
+# Loads <style> and <script> blocks from src/components/common-slider.html
+# so they can be injected once per page whenever a carousel is replaced.
+# ---------------------------------------------------------------------------
+_COMMON_SLIDER_CSS: str = ""
+_COMMON_SLIDER_JS: str = ""
+
+
+def _load_common_slider_component() -> tuple[str, str]:
+    """Return (css_block, js_block) from common-slider.html."""
+    global _COMMON_SLIDER_CSS, _COMMON_SLIDER_JS
+    if _COMMON_SLIDER_CSS and _COMMON_SLIDER_JS:
+        return _COMMON_SLIDER_CSS, _COMMON_SLIDER_JS
+
+    component_path = Path(__file__).parent / "components" / "common-slider.html"
+    try:
+        text = component_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning("Could not read common-slider.html: %s", e)
+        return "", ""
+
+    # Extract content between first <style>...</style>
+    style_match = re.search(r"<style>(.*?)</style>", text, re.DOTALL | re.IGNORECASE)
+    css = style_match.group(1).strip() if style_match else ""
+
+    # Extract content between first <script>...</script>
+    script_match = re.search(r"<script>(.*?)</script>", text, re.DOTALL | re.IGNORECASE)
+    js = script_match.group(1).strip() if script_match else ""
+
+    _COMMON_SLIDER_CSS = css
+    _COMMON_SLIDER_JS = js
+    return css, js
+
+
+# ---------------------------------------------------------------------------
+# Price parsing helper — converts "HK$1,399.00" or "1399" → float
+# ---------------------------------------------------------------------------
+_PRICE_NUMERIC_RE = re.compile(r"[\d,]+(?:\.\d{1,2})?")
+
+
+def _parse_price_numeric(price_str: str) -> float:
+    if not price_str:
+        return 0.0
+    cleaned = price_str.replace(",", "")
+    m = _PRICE_NUMERIC_RE.search(cleaned)
+    if m:
+        try:
+            return float(m.group().replace(",", ""))
+        except ValueError:
+            pass
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Convert an extracted tile dict to the cs-slider JSON item format
+# ---------------------------------------------------------------------------
+_BADGE_TO_TAG_COLOR = {
+    "折實價": "red", "減價": "red", "特價": "red", "Sale": "red",
+    "新產品": "green", "New": "green", "獨家發售": "green", "網店獨家": "green",
+    "免費加長改短": "orange", "加長改短": "orange", "可自訂": "orange",
+    "Hot": "orange",
+}
+
+
+def _tile_to_slider_item(tile: dict) -> dict:
+    current = _parse_price_numeric(tile.get("new_price", ""))
+    original = _parse_price_numeric(tile.get("old_price", ""))
+
+    tags = []
+    for badge in tile.get("badges", []):
+        color = _BADGE_TO_TAG_COLOR.get(badge, "green")
+        tags.append({"label": badge, "color": color})
+
+    price: dict = {"currency": "HKD", "current": current or None, "prefix": ""}
+    if original and original > current:
+        price["original"] = original
+
+    return {
+        "title": tile.get("title", ""),
+        "brand": tile.get("brand", ""),
+        "url": tile.get("href", ""),
+        "image": {
+            "primary": tile.get("img", ""),
+            "secondary": None,
+            "alt": tile.get("title", ""),
+        },
+        "price": price,
+        "tags": tags,
+        "stock": {"isOutOfStock": False, "label": ""},
+        "cta": None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Render a cs-slider element with product data embedded as inline JSON.
+# The common-slider.html CSS+JS is NOT included here — call
+# get_common_slider_head() and prepend it once per page.
+# ---------------------------------------------------------------------------
+def _render_common_slider(
+    tiles: list[dict],
+    title: str = "",
+    items_per_view: int = 4,
+    items_per_view_tablet: int = 3,
+    items_per_view_mobile: int = 2,
+) -> str:
+    items = [_tile_to_slider_item(t) for t in tiles]
+    json_data = json.dumps(items, ensure_ascii=False, separators=(",", ":"))
+
+    attrs = (
+        f'class="cs-slider"'
+        f' data-items-per-view="{items_per_view}"'
+        f' data-items-per-view-tablet="{items_per_view_tablet}"'
+        f' data-items-per-view-mobile="{items_per_view_mobile}"'
+        f' data-gap="16px"'
+    )
+    if title:
+        attrs += f' data-title="{_escape_attr(title)}"'
+
+    return (
+        f'<div {attrs}>'
+        f'<script type="application/json">{json_data}</script>'
+        f'</div>'
+    )
+
+
+def get_common_slider_head() -> str:
+    """Return a <style>+<script> block to be injected once per page."""
+    css, js = _load_common_slider_component()
+    parts = []
+    if css:
+        parts.append(f"<style>\n{css}\n</style>")
+    if js:
+        parts.append(f"<script>\n{js}\n</script>")
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -635,16 +772,19 @@ def _carousel_slides_per_view(carousel: Tag, tile_count: int) -> int:
 
 def rebuild_product_tiles(html: str) -> str:
     """Find product carousels in the given HTML and replace them with
-    self-contained static tile carousels.  Returns the modified HTML; if
-    no carousels are detected, the input is returned unchanged.
+    cs-slider components (common-slider.html).  Returns the modified HTML;
+    if no carousels are detected, the input is returned unchanged.
 
-    Safe to call multiple times — once rebuilt, the wrapper has class
-    `pr-tile-carousel` which we never re-match.
+    The common-slider CSS+JS is injected once at the top of the output
+    when at least one carousel is replaced, so the component is fully
+    self-contained inside Builder.io's Custom Code block.
+
+    Safe to call multiple times — replaced carousels carry the sentinel
+    class `cs-slider` which we never re-match.
     """
     if not html or "<" not in html:
         return html
-    # Cheap early-out: if there's nothing that looks remotely like a product
-    # grid, don't pay the BeautifulSoup cost.
+    # Cheap early-out: avoid BeautifulSoup cost when no carousel markers exist.
     if (
         "slick" not in html
         and "product-item" not in html
@@ -661,32 +801,58 @@ def rebuild_product_tiles(html: str) -> str:
 
     replaced = 0
     for carousel in _find_carousels(soup):
-        # Don't re-process our own output.
-        if "pr-tile-carousel" in (carousel.get("class") or []):
+        # Skip our own rebuilt output.
+        classes = carousel.get("class") or []
+        if "cs-slider" in classes or "pr-tile-carousel" in classes:
             continue
         tiles_nodes = _tiles_within(carousel)
         if not tiles_nodes:
             continue
         extracted = [_extract_tile(t) for t in tiles_nodes]
-        # Drop tiles that have neither image nor title (probably noise).
+        # Drop noise tiles (no image and no title).
         extracted = [t for t in extracted if t["img"] or t["title"]]
         if not extracted:
             continue
+
         spv = _carousel_slides_per_view(carousel, len(extracted))
-        new_html = _render_carousel(extracted, slides_per_view=spv)
+        spv_tablet = min(3, spv)
+        spv_mobile = min(2, spv)
+
+        # Try to pick up a heading from a sibling/ancestor block title.
+        title = ""
+        for sel in (".block-title strong", ".block-title span", ".widget-title",
+                    "[data-element='heading']", "h2", "h3"):
+            try:
+                parent = carousel.parent
+                heading = parent.select_one(sel) if parent else None
+                if heading:
+                    title = _text(heading)
+                    break
+            except Exception:
+                pass
+
+        new_html = _render_common_slider(
+            extracted,
+            title=title,
+            items_per_view=spv,
+            items_per_view_tablet=spv_tablet,
+            items_per_view_mobile=spv_mobile,
+        )
         new_node = BeautifulSoup(new_html, "html.parser")
         carousel.replace_with(new_node)
         replaced += 1
 
-    if replaced:
-        logger.info("product_tile_builder: rebuilt %d product carousel(s)", replaced)
-
-    # Static fallback: for any Slick carousel that survived (either because
-    # detection missed it or because _tiles_within returned empty), normalize
-    # the markup so CSS alone can render it without Slick's JS. This is the
-    # reliable path — the reinit <script> we embed is often blocked by
-    # Builder.io's Custom Code sandbox or Streamlit's preview iframe.
+    # Static fallback: strip Slick's pixel widths + translate3d from any
+    # carousel that survived detection so CSS-only scrolling still works.
     _normalize_slick_inplace(soup)
+
+    if replaced:
+        logger.info("product_tile_builder: replaced %d carousel(s) with cs-slider", replaced)
+        # Inject common-slider CSS+JS once at the beginning of the fragment
+        # so the component is fully self-contained inside Builder.io.
+        slider_head = get_common_slider_head()
+        if slider_head:
+            return slider_head + "\n" + str(soup)
 
     return str(soup)
 

@@ -227,7 +227,7 @@ class MigrationAgent:
             if page_type == "blog":
                 primary_url = f"{self.source_base_url}{self.blog_path}{url_key}"
             else:
-                primary_url = f"{self.source_base_url}/{url_key}"
+                primary_url = f"{self.source_base_url}/hk/zh/{url_key}"
 
             clean_key = _normalize_url_key(url_key)
             pages_to_migrate.append({
