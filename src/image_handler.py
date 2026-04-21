@@ -274,19 +274,28 @@ class ImageHandler:
                         a_tag["href"] = builder_url
 
         # --- Pass 4: Replace image URLs in inline style background-image ---
-        bg_pattern = re.compile(r'url\(["\']?(https?://[^"\')\s]+)["\']?\)')
+        # Matches absolute (https?://), protocol-relative (//), and root-relative (/...)
+        bg_pattern = re.compile(r"""url\(\s*['"]?((?:https?:)?//[^'"\)\s]+|/[^'"\)\s]*)['"']?\s*\)""")
         for tag in soup.find_all(style=True):
             style = tag["style"]
             if "url(" in style:
-                def replace_bg_url(match):
-                    old_url = match.group(1)
-                    if self._is_image_url(old_url):
-                        if old_url in url_mapping:
-                            return f'url("{url_mapping[old_url]}")'
-                        new_url = self._resolve_and_upload_image(old_url, base_url)
-                        if new_url:
-                            url_mapping[old_url] = new_url
-                            return f'url("{new_url}")'
+                def replace_bg_url(match, _base=base_url, _map=url_mapping):
+                    raw_url = match.group(1)
+                    # Resolve protocol-relative and root-relative URLs
+                    if raw_url.startswith("//"):
+                        old_url = "https:" + raw_url
+                    elif raw_url.startswith("/"):
+                        old_url = urljoin(_base, raw_url) if _base else raw_url
+                    else:
+                        old_url = raw_url
+                    if not self._is_image_url(old_url):
+                        return match.group(0)
+                    if old_url in _map:
+                        return f'url("{_map[old_url]}")'
+                    new_url = self._resolve_and_upload_image(old_url, _base)
+                    if new_url:
+                        _map[old_url] = new_url
+                        return f'url("{new_url}")'
                     return match.group(0)
                 tag["style"] = bg_pattern.sub(replace_bg_url, style)
 
@@ -302,15 +311,21 @@ class ImageHandler:
             if not css_text or "url(" not in css_text:
                 continue
 
-            def replace_style_bg_url(match):
-                old_url = match.group(1)
+            def replace_style_bg_url(match, _base=base_url, _map=url_mapping):
+                raw_url = match.group(1)
+                if raw_url.startswith("//"):
+                    old_url = "https:" + raw_url
+                elif raw_url.startswith("/"):
+                    old_url = urljoin(_base, raw_url) if _base else raw_url
+                else:
+                    old_url = raw_url
                 if not self._is_image_url(old_url):
                     return match.group(0)
-                if old_url in url_mapping:
-                    return f'url("{url_mapping[old_url]}")'
-                new_url = self._resolve_and_upload_image(old_url, base_url)
+                if old_url in _map:
+                    return f'url("{_map[old_url]}")'
+                new_url = self._resolve_and_upload_image(old_url, _base)
                 if new_url:
-                    url_mapping[old_url] = new_url
+                    _map[old_url] = new_url
                     return f'url("{new_url}")'
                 return match.group(0)
 

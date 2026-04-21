@@ -95,6 +95,20 @@ def _make_images_absolute(html_content: str, base_url: str) -> str:
     html_content = re.sub(r'(\bsrc=")([^"]*)(")', _fix_src, html_content)
     # srcset="..."  (on <img> and <source>)
     html_content = re.sub(r'(\bsrcset=")([^"]*)(")', _fix_srcset_attr, html_content)
+
+    # background-image: url('...') in inline style= attributes.
+    # Matches root-relative (/...), protocol-relative (//...), and bare relative paths.
+    def _fix_bg_url(match: re.Match) -> str:
+        quote = match.group(1)  # ' or " or empty
+        url_val = match.group(2)
+        resolved = _resolve_one_url(url_val, domain, page_origin)
+        return f"url({quote}{resolved}{quote})"
+
+    html_content = re.sub(
+        r"""url\((['"]?)((?!https?://|data:|blob:)[^'"\)]+)\1\)""",
+        _fix_bg_url,
+        html_content,
+    )
     return html_content
 
 

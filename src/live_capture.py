@@ -182,6 +182,135 @@ _CAROUSEL_REINIT_JS = """\
 """
 
 
+# ---------------------------------------------------------------------------
+# Tab reinitialisation script — injected alongside the carousel reinit.
+#
+# Magento Page Builder tab widgets and Magento native tab widgets both lose
+# their click handlers when <script> tags are stripped for Builder.io Custom
+# Code blocks. This script re-wires the tab buttons so clicking them shows
+# the correct content pane.
+#
+# Handles three patterns:
+#   1. Magento Page Builder  → [data-content-type="tabs"] with
+#      .tab-header-item headers and [data-content-type="tab-item"] panes
+#   2. Magento native widget → ul.tabs-navigation siblings of .tabs-content
+#   3. ARIA tablist          → [role="tablist"] + [role="tab"] + aria-controls
+# ---------------------------------------------------------------------------
+_TAB_REINIT_JS = """\
+(function () {
+  'use strict';
+
+  function switchTo(freshHeaders, panes, i) {
+    freshHeaders.forEach(function (h, idx) {
+      var on = idx === i;
+      h.classList.toggle('active', on);
+      h.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    panes.forEach(function (p, idx) {
+      if (idx === i) {
+        p.style.removeProperty('display');
+        p.classList.add('active');
+      } else {
+        p.style.setProperty('display', 'none', '');
+        p.classList.remove('active');
+      }
+    });
+  }
+
+  function wireHeaders(rawHeaders, panes) {
+    if (!rawHeaders.length || !panes.length) return;
+    /* Clone nodes to strip any stale event listeners Magento / React left. */
+    var fresh = rawHeaders.map(function (h) {
+      var f = h.cloneNode(true);
+      h.parentNode && h.parentNode.replaceChild(f, h);
+      return f;
+    });
+    fresh.forEach(function (h, i) {
+      h.style.cursor = 'pointer';
+      h.addEventListener('click', function () { switchTo(fresh, panes, i); });
+    });
+    /* Start with the first tab active. */
+    switchTo(fresh, panes, 0);
+  }
+
+  /* ---- Pattern 1: Magento Page Builder tabs -------------------------------- */
+  function initPBTabs() {
+    document.querySelectorAll('[data-content-type="tabs"]').forEach(function (w) {
+      if (w.__tabsOk) return;
+      w.__tabsOk = true;
+
+      /* Headers — the <ul> inside the widget contains <li> tab buttons. */
+      var ul = w.querySelector(':scope > div > ul, :scope > ul');
+      var headers = ul ? Array.from(ul.querySelectorAll(
+        'li.tab-header-item, li[data-tab-item], li'
+      )) : [];
+
+      /* Panes — direct [data-content-type="tab-item"] children. */
+      var panes = Array.from(w.querySelectorAll('[data-content-type="tab-item"]'));
+
+      wireHeaders(headers, panes);
+    });
+  }
+
+  /* ---- Pattern 2: Magento native tab widget -------------------------------- */
+  function initNativeTabs() {
+    document.querySelectorAll('ul.tabs-navigation, .nav-tabs, [class*="tabNav"]').forEach(
+      function (nav) {
+        if (nav.__tabsOk) return;
+        nav.__tabsOk = true;
+
+        var items = Array.from(nav.querySelectorAll('li, [role="tab"]'));
+        /* Look for the sibling content wrapper. */
+        var wrap = nav.parentNode && nav.parentNode.querySelector(
+          '.tabs-content, .tab-content, [class*="tabContent"]'
+        );
+        if (!wrap) wrap = nav.nextElementSibling;
+        if (!wrap) return;
+
+        var panes = Array.from(wrap.querySelectorAll(
+          '.tab-container, .tab-pane, [data-role="content"], [class*="tabPane"]'
+        ));
+        if (!panes.length) panes = Array.from(wrap.children);
+
+        wireHeaders(items, panes);
+      }
+    );
+  }
+
+  /* ---- Pattern 3: ARIA tablist -------------------------------------------- */
+  function initAriaTabs() {
+    document.querySelectorAll('[role="tablist"]').forEach(function (tl) {
+      if (tl.__tabsOk) return;
+      tl.__tabsOk = true;
+
+      var tabs = Array.from(tl.querySelectorAll('[role="tab"]'));
+      var panes = tabs.map(function (t) {
+        var id = t.getAttribute('aria-controls')
+               || (t.getAttribute('href') || '').replace(/^#/, '')
+               || t.getAttribute('data-target') || '';
+        return id ? (document.getElementById(id)
+               || document.querySelector('[data-panel="' + id + '"]')) : null;
+      }).filter(Boolean);
+
+      wireHeaders(tabs, panes);
+    });
+  }
+
+  function run() {
+    initPBTabs();
+    initNativeTabs();
+    initAriaTabs();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', run);
+  } else {
+    setTimeout(run, 0);
+  }
+})();
+"""
+
+
 # Extra CSS added to every live-captured fragment to fix carousel layout
 # and prevent image cropping that happens when Slick's pixel-based widths
 # are no longer valid at Builder.io's viewport.
@@ -367,6 +496,26 @@ _CAROUSEL_CSS_FIXES = """\
   .migrated-live-content .slick-slide {
     max-width: 240px;
   }
+}
+
+/* ---- Tabbed content: hide inactive panes, show active pane ----------- */
+.migrated-live-content [data-content-type="tab-item"] {
+  display: none !important;
+}
+.migrated-live-content [data-content-type="tab-item"]:first-child,
+.migrated-live-content [data-content-type="tab-item"].active {
+  display: block !important;
+}
+.migrated-live-content .tab-header-item,
+.migrated-live-content [role="tab"],
+.migrated-live-content .tabs-navigation li a {
+  cursor: pointer !important;
+  user-select: none;
+}
+.migrated-live-content .tab-header-item.active,
+.migrated-live-content [role="tab"][aria-selected="true"],
+.migrated-live-content .tabs-navigation li.active a {
+  font-weight: 700 !important;
 }
 """
 
@@ -567,6 +716,36 @@ _CAPTURE_SCRIPT = r"""
       var fixedSs = normalizeSrcset(ss);
       if (fixedSs !== ss) src.setAttribute("srcset", fixedSs);
     }
+  });
+
+  // Normalize background-image URLs in inline style= attributes.
+  // The DOM property `el.style.backgroundImage` always returns an absolute
+  // resolved URL (e.g. url("https://www.pricerite.com.hk/media/...")) even
+  // when the raw HTML attribute had a root-relative path like url('/media/...').
+  // Writing the resolved value back to the attribute ensures the captured HTML
+  // contains absolute URLs so the migrated page works outside the original domain.
+  root.querySelectorAll("[style]").forEach(function(el) {
+    try {
+      var bi = el.style.backgroundImage;
+      if (bi && bi !== "none" && bi !== "") {
+        var rawStyle = el.getAttribute("style") || "";
+        // Replace only the url(...) tokens that are NOT already absolute HTTP.
+        var fixed = rawStyle.replace(
+          /url\(\s*(['"]?)(?!https?:\/\/|data:|blob:)(.*?)\1\s*\)/gi,
+          function(match, quote, path) {
+            if (!path) return match;
+            var abs;
+            try {
+              abs = new URL(path, document.location.href).href;
+            } catch (e) {
+              abs = PAGE_ORIGIN + (path.startsWith("/") ? "" : "/") + path;
+            }
+            return 'url("' + abs + '")';
+          }
+        );
+        if (fixed !== rawStyle) el.setAttribute("style", fixed);
+      }
+    } catch (e) { /* skip elements that throw on style access */ }
   });
 
   // Clone so mutations don't affect the live page before other evaluations.
@@ -1302,6 +1481,7 @@ async def _capture_async(
                 '<div class="migrated-live-content">\n'
                 f"<style>\n{css}\n{_CAROUSEL_CSS_FIXES}\n</style>\n"
                 f"<script>\n{_CAROUSEL_REINIT_JS}\n</script>\n"
+                f"<script>\n{_TAB_REINIT_JS}\n</script>\n"
                 f"{hero_html}"
                 f"{html}\n"
                 "</div>"
