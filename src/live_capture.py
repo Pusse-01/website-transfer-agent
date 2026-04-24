@@ -37,6 +37,56 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 
+def _convert_rem_to_px(css: str, root_px: float) -> str:
+    """Convert rem values in CSS rule bodies to px using the captured root font size.
+
+    Leaves @media/@supports/@container condition parts (before the first '{')
+    untouched — those are always evaluated against the browser initial value of
+    16 px regardless of html { font-size: … }, so they are already correct on
+    both the original site and inside Builder.io.
+
+    This fixes the common Magento/PWA-Studio pattern where the theme sets
+    html { font-size: 62.5% } (= 10 px) and sizes everything in rem.  Inside
+    Builder.io the html element stays at 16 px, so 1.4rem renders as 22.4 px
+    instead of the intended 14 px.  Converting to absolute px eliminates the
+    dependency on the host-page root font size.
+    """
+    if abs(root_px - 16.0) < 0.1:
+        return css  # Root is effectively 16 px — rem already resolves correctly.
+
+    # Protect @media / @supports / @container condition text (everything from
+    # the at-keyword up to but NOT including the opening brace of the rule body)
+    # by swapping it out for a placeholder.  rem values there must stay as rem
+    # because the browser resolves them against 16 px regardless of html font-size.
+    placeholders: dict[str, str] = {}
+    _counter = [0]
+
+    def _protect(m: re.Match) -> str:
+        key = f"\x00ATCOND{_counter[0]}\x00"
+        placeholders[key] = m.group(0)
+        _counter[0] += 1
+        return key
+
+    protected = re.sub(
+        r"@(?:media|supports|container)\b[^{]*",
+        _protect,
+        css,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    def _rem_to_px(m: re.Match) -> str:
+        val = float(m.group(1))
+        px = val * root_px
+        return f"{int(px)}px" if px == int(px) else f"{round(px, 3)}px"
+
+    converted = re.sub(r"(-?(?:\d+\.?\d*|\.\d+))\s*rem\b", _rem_to_px, protected)
+
+    for key, original in placeholders.items():
+        converted = converted.replace(key, original)
+
+    return converted
+
+
 # ---------------------------------------------------------------------------
 # Carousel reinitialisation script — injected into every captured fragment.
 #
@@ -1127,11 +1177,14 @@ _CAPTURE_SCRIPT = r"""
     }
   }
 
+  const rootFontSizePx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+
   return {
     rootSelector: rootSelector,
     html: clone.outerHTML,
     css: collectedCss.join("\n\n"),
     ruleCount: ruleCount,
+    rootFontSizePx: rootFontSizePx,
     title: (document.querySelector('h1') && document.querySelector('h1').innerText.trim()) || (metaTitleEl ? metaTitleEl.innerText : ""),
     metaTitle: metaTitleEl ? metaTitleEl.innerText : "",
     metaDescription: descEl ? descEl.getAttribute("content") || "" : "",
@@ -1426,6 +1479,7 @@ async def _capture_async(
 
             css = payload.get("css", "") or ""
             html = payload.get("html", "") or ""
+            root_font_size_px = float(payload.get("rootFontSizePx") or 16)
 
             # Strip dangerous positioning that escapes Builder.io's Custom Code
             # container. Sticky/fixed headers inside a block float over
@@ -1436,6 +1490,12 @@ async def _capture_async(
                 css,
                 flags=re.IGNORECASE,
             )
+
+            # Convert rem values in CSS rule bodies to absolute px so that font
+            # sizes render identically inside Builder.io (where the html element
+            # has 16 px) as on the original Magento/PWA-Studio site (where the
+            # theme typically sets html { font-size: 62.5% } = 10 px).
+            css = _convert_rem_to_px(css, root_font_size_px)
 
             # Replace Magento product carousels with self-contained static
             # tiles.  Magento fills price/title/cart via Knockout bindings,

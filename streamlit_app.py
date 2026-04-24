@@ -813,9 +813,17 @@ with tab_preview:
                                 else pub_client.page_model
                             )
 
+                            # Normalize the url_key (strip .html suffix and
+                            # surrounding slashes) so check_entry_exists and
+                            # the Builder.io path always use the clean form,
+                            # matching what create_entry writes to the slug field.
+                            clean_url_key = pub_client._clean_url_key(
+                                post_data.get("url_key", "")
+                            )
+
                             # 1. Delete existing entry if any
                             existing = pub_client.check_entry_exists(
-                                post_data.get("url_key", ""), model_override=model
+                                clean_url_key, model_override=model
                             )
                             if existing and existing.get("id"):
                                 st.write(f"Found existing entry `{existing['id']}` — deleting...")
@@ -831,6 +839,7 @@ with tab_preview:
 
                             # 2. Run the full image pipeline and link rewrite
                             upload_data = dict(post_data)
+                            upload_data["url_key"] = clean_url_key
                             img_handler = ImageHandler(builder_api_key=builder_private_key)
                             try:
                                 st.write("Uploading images to Builder.io CDN...")
