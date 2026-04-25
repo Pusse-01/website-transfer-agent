@@ -15,7 +15,9 @@ Every step is logged with the page_key for filtering.
 
 import json
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -117,6 +119,7 @@ class MigrationAgent:
         priority_filter: int = 0,
         dry_run: bool = False,
         progress_callback=None,
+        workers: int = 1,
     ) -> dict:
         """
         Migrate pages listed in an Excel file.
@@ -138,11 +141,11 @@ class MigrationAgent:
 
         if excel_type == "blog":
             return self._migrate_blog_from_excel(
-                excel_path, publish, skip_existing, limit, priority_filter, dry_run, progress_callback
+                excel_path, publish, skip_existing, limit, priority_filter, dry_run, progress_callback, workers
             )
         elif excel_type == "static":
             return self._migrate_static_from_excel(
-                excel_path, publish, skip_existing, limit, dry_run, progress_callback
+                excel_path, publish, skip_existing, limit, dry_run, progress_callback, workers
             )
         else:
             self.mlog.error("__pipeline__", "", "excel_read",
@@ -150,7 +153,7 @@ class MigrationAgent:
             return self.results
 
     def _migrate_blog_from_excel(
-        self, excel_path, publish, skip_existing, limit, priority_filter, dry_run, progress_callback
+        self, excel_path, publish, skip_existing, limit, priority_filter, dry_run, progress_callback, workers=1
     ) -> dict:
         """Migrate blog posts from a Blog Post List Excel."""
         blog_posts = read_blog_list(excel_path)
@@ -183,10 +186,10 @@ class MigrationAgent:
                 "original_data": post,
             })
 
-        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback)
+        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback, workers)
 
     def _migrate_static_from_excel(
-        self, excel_path, publish, skip_existing, limit, dry_run, progress_callback
+        self, excel_path, publish, skip_existing, limit, dry_run, progress_callback, workers=1
     ) -> dict:
         """Migrate static pages from a Static Page List Excel."""
         static_pages = read_static_page_list(excel_path)
@@ -210,7 +213,7 @@ class MigrationAgent:
                 "original_data": page,
             })
 
-        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback)
+        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback, workers)
 
     def migrate_from_url_keys(
         self,
@@ -220,6 +223,7 @@ class MigrationAgent:
         skip_existing: bool = True,
         dry_run: bool = False,
         progress_callback=None,
+        workers: int = 1,
     ) -> dict:
         """Migrate specific pages by URL keys."""
         pages_to_migrate = []
@@ -238,7 +242,7 @@ class MigrationAgent:
                 "original_data": {"url_key": clean_key},
             })
 
-        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback)
+        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback, workers)
 
     def migrate_combined(
         self,
@@ -249,6 +253,7 @@ class MigrationAgent:
         limit: int = 0,
         dry_run: bool = False,
         progress_callback=None,
+        workers: int = 1,
     ) -> dict:
         """
         Migrate from both blog and static page Excel files in one run.
@@ -293,7 +298,7 @@ class MigrationAgent:
             self.mlog.error("__pipeline__", "", "excel_read", "No pages found in either Excel file")
             return self.results
 
-        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback)
+        return self._run_migration(pages_to_migrate, publish, skip_existing, dry_run, progress_callback, workers)
 
     def _run_migration(
         self,
@@ -302,15 +307,27 @@ class MigrationAgent:
         skip_existing: bool,
         dry_run: bool,
         progress_callback=None,
+        workers: int = 1,
     ) -> dict:
-        """Core migration loop - process a list of pages."""
+        """Core migration loop — processes pages sequentially or in parallel.
+
+        Args:
+            workers: Number of concurrent workers. 1 = sequential (default).
+                     Values > 1 run that many pages simultaneously using
+                     ThreadPoolExecutor. Each worker has its own scraper
+                     session; the Builder.io client and image handler are
+                     shared but internally thread-safe.
+        """
         self.results["started_at"] = datetime.now().isoformat()
         self.results["total"] = len(pages)
+        _results_lock = threading.Lock()
+        effective_workers = max(1, workers)
 
         self.mlog.info("__pipeline__", "", "init",
-                       f"Starting migration of {len(pages)} pages (dry_run={dry_run})")
+                       f"Starting migration of {len(pages)} pages "
+                       f"(workers={effective_workers}, dry_run={dry_run})")
 
-        for i, page_info in enumerate(pages, 1):
+        def _process_one(i: int, page_info: dict) -> dict:
             url_key = page_info["url_key"]
             page_type = page_info["page_type"]
             primary_url = page_info["primary_url"]
@@ -330,27 +347,49 @@ class MigrationAgent:
                 dry_run=dry_run,
             )
 
-            # Attach original Excel data for export
             result["original_data"] = page_info.get("original_data", {})
             result["page_type"] = page_type
-            self.results["details"].append(result)
 
-            if result["status"] == STATUS_PUBLISHED:
-                self.results["success"] += 1
-            elif result["status"] == STATUS_SKIPPED:
-                self.results["skipped"] += 1
-            elif result["status"] == STATUS_NEEDS_REVIEW:
-                self.results["needs_review"] += 1
-            else:
-                self.results["failed"] += 1
+            with _results_lock:
+                self.results["details"].append(result)
+                if result["status"] == STATUS_PUBLISHED:
+                    self.results["success"] += 1
+                elif result["status"] == STATUS_SKIPPED:
+                    self.results["skipped"] += 1
+                elif result["status"] == STATUS_NEEDS_REVIEW:
+                    self.results["needs_review"] += 1
+                else:
+                    self.results["failed"] += 1
 
             if progress_callback:
                 progress_callback(i, len(pages), url_key, result["status"])
 
-            # Tiny yield between pages so the event loop stays responsive.
-            # Actual rate limiting is handled per-request inside BuilderClient.
-            if i < len(pages):
-                time.sleep(0.05)
+            return result
+
+        if effective_workers == 1:
+            for i, page_info in enumerate(pages, 1):
+                _process_one(i, page_info)
+                if i < len(pages):
+                    time.sleep(0.05)
+        else:
+            with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+                futures = {
+                    pool.submit(_process_one, i, page_info): page_info
+                    for i, page_info in enumerate(pages, 1)
+                }
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        page_info = futures[future]
+                        self.mlog.error(
+                            page_info.get("url_key", "?"),
+                            page_info.get("page_type", ""),
+                            "error",
+                            f"Unhandled worker exception: {exc}",
+                        )
+                        with _results_lock:
+                            self.results["failed"] += 1
 
         self.results["completed_at"] = datetime.now().isoformat()
         self.mlog.info("__pipeline__", "", "complete", "Migration complete", {
@@ -618,7 +657,13 @@ class MigrationAgent:
         If live capture fails (Playwright missing, network issue, bad selector),
         we fall back to the legacy GraphQL / HTML scrapers so the pipeline
         still produces a result.
+
+        Fresh scraper instances are created per call so each worker thread has
+        its own requests.Session and there are no shared-state races.
         """
+        blog_scraper = BlogScraper(self.source_base_url, self.blog_path)
+        static_scraper = StaticPageScraper(self.source_base_url)
+
         # Live capture path — preferred, works for both page types.
         if self.use_live_capture and primary_url:
             capture = capture_live_fragment(
@@ -654,7 +699,7 @@ class MigrationAgent:
                 # already knew (like graphql tags/categories for blog posts).
                 meta = {}
                 if page_type == "blog":
-                    legacy = self.blog_scraper.fetch_post_by_url_key(url_key) or {}
+                    legacy = blog_scraper.fetch_post_by_url_key(url_key) or {}
                     if legacy and not legacy.get("error"):
                         meta = legacy
 
@@ -685,9 +730,9 @@ class MigrationAgent:
                 )
 
         if page_type == "blog":
-            return self.blog_scraper.fetch_post_by_url_key(url_key)
+            return blog_scraper.fetch_post_by_url_key(url_key)
         else:
-            return self.static_scraper.fetch_page_by_url(primary_url, url_key)
+            return static_scraper.fetch_page_by_url(primary_url, url_key)
 
     def _assess_confidence(self, page_data: dict) -> str:
         """

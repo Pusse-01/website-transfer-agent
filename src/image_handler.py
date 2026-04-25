@@ -6,6 +6,7 @@ import io
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse, urljoin
@@ -21,23 +22,36 @@ class ImageHandler:
 
     BUILDER_UPLOAD_URL = "https://builder.io/api/v1/upload"
 
+    _SESSION_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/121.0.0.0 Safari/537.36"
+        ),
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
     def __init__(self, builder_api_key: str, download_dir: str = "downloaded_images"):
         self.builder_api_key = builder_api_key
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
-        self.session = requests.Session()
-        self.session.headers.update({
-            # Use a realistic browser UA so hotlink-protection checks pass.
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/121.0.0.0 Safari/537.36"
-            ),
-            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        # Cache mapping: source_url -> builder_url
+        # Thread-local sessions: each worker thread gets its own connection pool,
+        # avoiding the thread-safety issues of a single shared requests.Session.
+        self._local = threading.local()
+        # Cache mapping: source_url -> builder_url.
+        # Protected by _cache_lock so concurrent workers don't double-upload.
         self._upload_cache: dict[str, str] = {}
+        self._cache_lock = threading.Lock()
+
+    @property
+    def _session(self) -> requests.Session:
+        """Return the requests.Session for the current thread, creating it if needed."""
+        if not hasattr(self._local, "session"):
+            s = requests.Session()
+            s.headers.update(self._SESSION_HEADERS)
+            self._local.session = s
+        return self._local.session
 
     def download_image(self, image_url: str, page_url: str = "") -> Path | None:
         """Download an image from a URL to local storage."""
@@ -71,7 +85,7 @@ class ImageHandler:
             else:
                 parsed_ref = urlparse(image_url)
                 referer = f"{parsed_ref.scheme}://{parsed_ref.netloc}/"
-            response = self.session.get(
+            response = self._session.get(
                 image_url, timeout=30, stream=True,
                 headers={"Referer": referer},
             )
@@ -95,10 +109,10 @@ class ImageHandler:
 
         fname = filename or local_path.name
 
-        # Check cache
         cache_key = str(local_path)
-        if cache_key in self._upload_cache:
-            return self._upload_cache[cache_key]
+        with self._cache_lock:
+            if cache_key in self._upload_cache:
+                return self._upload_cache[cache_key]
 
         try:
             # Determine content type
@@ -134,7 +148,8 @@ class ImageHandler:
                 builder_url = result.get("data", {}).get("url", "")
 
             if builder_url:
-                self._upload_cache[cache_key] = builder_url
+                with self._cache_lock:
+                    self._upload_cache[cache_key] = builder_url
                 logger.info(f"Uploaded to Builder.io: {fname} -> {builder_url}")
                 return builder_url
             else:
@@ -156,9 +171,9 @@ class ImageHandler:
 
         resolved = src if src.startswith("http") else urljoin(base_url, src)
 
-        # Check URL-level cache (different from the local-path upload cache)
-        if resolved in self._upload_cache:
-            return self._upload_cache[resolved]
+        with self._cache_lock:
+            if resolved in self._upload_cache:
+                return self._upload_cache[resolved]
 
         local_path = self.download_image(resolved, page_url=page_url)
         if not local_path:
@@ -166,8 +181,9 @@ class ImageHandler:
 
         builder_url = self.upload_to_builder(local_path)
         if builder_url:
-            self._upload_cache[resolved] = builder_url
-            time.sleep(0.5)  # Rate limit
+            with self._cache_lock:
+                self._upload_cache[resolved] = builder_url
+            time.sleep(0.3)  # Rate limit
         return builder_url
 
     def _is_image_url(self, url: str) -> bool:

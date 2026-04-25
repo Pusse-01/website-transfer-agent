@@ -99,8 +99,8 @@ def main():
     )
     parser.add_argument(
         "--blog-path",
-        default="/news/",
-        help="Blog path on source website (default: /news/)",
+        default=None,
+        help="Blog path on source website, e.g. /hk/zh/news/ (default: SOURCE_BLOG_PATH from .env)",
     )
 
     # Migration options
@@ -127,6 +127,15 @@ def main():
 
     # General options
     parser.add_argument(
+        "--workers", "-w", type=int, default=1,
+        help=(
+            "Number of pages to migrate in parallel (default: 1). "
+            "Values of 3-5 give a good speed boost without hitting API limits. "
+            "Each worker renders its own Playwright browser instance, so higher "
+            "values increase CPU and memory usage."
+        ),
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable verbose logging",
     )
@@ -151,6 +160,7 @@ def main():
         sys.exit(1)
 
     source_url = args.source_url or os.getenv("SOURCE_BASE_URL", "https://www.pricerite.com.hk")
+    blog_path = args.blog_path or os.getenv("SOURCE_BLOG_PATH", "/hk/zh/news/")
     public_key = os.getenv("BUILDER_PUBLIC_KEY", "")
 
     if args.dry_run and not api_key:
@@ -159,7 +169,8 @@ def main():
     # Show configuration
     console.print("\n[bold]Website Transfer Agent[/bold]")
     console.print(f"  Source:     {source_url}")
-    console.print(f"  Blog path:  {args.blog_path}")
+    console.print(f"  Blog path:  {blog_path}")
+    console.print(f"  Workers:    {args.workers}")
     console.print(f"  Publish:    {'Yes' if args.publish else 'No (draft)'}")
     console.print(f"  Dry run:    {'Yes' if args.dry_run else 'No'}")
     console.print()
@@ -169,7 +180,7 @@ def main():
         source_base_url=source_url,
         builder_api_key=api_key,
         builder_model="blog-post",
-        blog_path=args.blog_path,
+        blog_path=blog_path,
         builder_public_key=public_key,
     )
 
@@ -182,6 +193,7 @@ def main():
             skip_existing=not args.no_skip_existing,
             limit=args.limit,
             dry_run=args.dry_run,
+            workers=args.workers,
         )
     elif args.excel:
         results = agent.migrate_from_excel(
@@ -191,6 +203,7 @@ def main():
             limit=args.limit,
             priority_filter=args.priority,
             dry_run=args.dry_run,
+            workers=args.workers,
         )
     else:
         url_keys = [k.strip() for k in args.urls.split(",") if k.strip()]
@@ -200,6 +213,7 @@ def main():
             publish=args.publish,
             skip_existing=not args.no_skip_existing,
             dry_run=args.dry_run,
+            workers=args.workers,
         )
 
     # Display results table
