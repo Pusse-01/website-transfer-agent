@@ -130,12 +130,16 @@ class BuilderClient:
     def _cdn_url(self, model: str, extra_params: str = "") -> str:
         """Build a CDN read URL.
 
-        The CDN API (v3) always requires a public API key as a query param.
-        Private keys (bpk-*) are only for the Write API (v1).
-        If a public_key was provided, use it; otherwise fall back to the
-        api_key (which works if it's already a public key).
+        The CDN API (v3) requires a PUBLIC key. Private keys (bpk-*) are only
+        valid for the Write API (v1) and will get a 401 from the CDN endpoint.
+        Set BUILDER_PUBLIC_KEY in .env to avoid this.
         """
         read_key = self.public_key or self.api_key
+        if read_key.startswith("bpk-"):
+            logger.warning(
+                "CDN read is using the private API key — this will return 401. "
+                "Set BUILDER_PUBLIC_KEY in your .env file with the public (non-bpk-) key."
+            )
         sep = "&" if extra_params else ""
         url = f"{self.CDN_BASE_URL}/{model}?apiKey={read_key}{sep}{extra_params}"
         return url
