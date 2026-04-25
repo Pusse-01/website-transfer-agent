@@ -9,6 +9,7 @@ Supports two content models:
 import json
 import logging
 import re
+import threading
 import time
 import uuid
 
@@ -35,11 +36,12 @@ def _clean_url_key(url_key) -> str:
     return key
 
 
-# Builder.io Write API rate limits (approximate):
-# - 50 requests per 10 seconds for write operations
-# - We add conservative delays to stay well within limits
-WRITE_DELAY_SECONDS = 1.0
-READ_DELAY_SECONDS = 0.3
+# Builder.io Write API rate limits: 50 requests / 10 s = 5 req/s max.
+# 0.25 s between writes ≈ 4 req/s — safely within limits and 4× faster than
+# the previous 1.0 s delay. The lock makes _rate_limit thread-safe so
+# concurrent migration workers don't collide.
+WRITE_DELAY_SECONDS = 0.25
+READ_DELAY_SECONDS = 0.15
 
 
 class BuilderClient:
@@ -65,6 +67,7 @@ class BuilderClient:
         })
         self._request_count = 0
         self._last_request_time = 0.0
+        self._rate_lock = threading.Lock()
 
     @staticmethod
     def _derive_entry_name(data: dict) -> str:
@@ -330,15 +333,16 @@ class BuilderClient:
             return {"success": False, "error": str(e)}
 
     def _rate_limit(self, min_delay: float):
-        """Enforce minimum delay between API requests."""
-        now = time.time()
-        elapsed = now - self._last_request_time
-        if elapsed < min_delay:
-            sleep_time = min_delay - elapsed
-            logger.debug(f"Rate limiting: sleeping {sleep_time:.1f}s")
-            time.sleep(sleep_time)
-        self._last_request_time = time.time()
-        self._request_count += 1
+        """Enforce minimum delay between API requests (thread-safe)."""
+        with self._rate_lock:
+            now = time.time()
+            elapsed = now - self._last_request_time
+            if elapsed < min_delay:
+                sleep_time = min_delay - elapsed
+                logger.debug(f"Rate limiting: sleeping {sleep_time:.2f}s")
+                time.sleep(sleep_time)
+            self._last_request_time = time.time()
+            self._request_count += 1
 
     def _html_to_builder_blocks(self, html_content: str, wide_layout: bool = False,
                                 skip_processing: bool = False) -> list[dict]:

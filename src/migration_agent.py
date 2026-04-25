@@ -19,7 +19,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .scraper import BlogScraper, StaticPageScraper
+from .scraper import BlogScraper, StaticPageScraper, _is_soft_404_title
 from .image_handler import ImageHandler
 from .builder_client import BuilderClient
 from .excel_reader import read_blog_list, read_static_page_list, detect_excel_type
@@ -347,9 +347,10 @@ class MigrationAgent:
             if progress_callback:
                 progress_callback(i, len(pages), url_key, result["status"])
 
-            # Rate limit between pages
+            # Tiny yield between pages so the event loop stays responsive.
+            # Actual rate limiting is handled per-request inside BuilderClient.
             if i < len(pages):
-                time.sleep(0.5)
+                time.sleep(0.05)
 
         self.results["completed_at"] = datetime.now().isoformat()
         self.mlog.info("__pipeline__", "", "complete", "Migration complete", {
@@ -625,6 +626,25 @@ class MigrationAgent:
                 login=self.magento_login,
             )
             if capture.ok:
+                # Reject soft-404 pages that Playwright rendered successfully
+                # but whose title is an error-page title (e.g. "404 無法顯示頁面").
+                # This happens when SOURCE_BLOG_PATH is wrong and every URL
+                # resolves to the Pricerite 404 error page (HTTP 200).
+                captured_title = capture.meta_title or capture.title or ""
+                if _is_soft_404_title(captured_title):
+                    self.mlog.error(
+                        url_key, page_type, "scrape",
+                        f"Live capture returned a soft-404 page (title: '{captured_title}'). "
+                        "Check SOURCE_BLOG_PATH in .env — constructed URL is hitting the error page.",
+                    )
+                    return {
+                        "error": (
+                            f"Soft 404: live capture title is '{captured_title}'. "
+                            "Verify SOURCE_BLOG_PATH includes the locale prefix (e.g. /hk/zh/news/)."
+                        ),
+                        "url_key": url_key,
+                    }
+
                 self.mlog.info(
                     url_key, page_type, "scrape",
                     f"Live capture OK: {capture.css_rule_count} CSS rules, "
@@ -685,6 +705,12 @@ class MigrationAgent:
 
         # No title found
         if not title:
+            return "low"
+
+        # Safety net: reject any content whose title looks like a 404 / error page.
+        # The primary guard is in _scrape_page, but this catches edge cases where
+        # partial content was returned alongside an error-page title.
+        if _is_soft_404_title(title):
             return "low"
 
         # GraphQL/CMS API source is more reliable than HTML scraping

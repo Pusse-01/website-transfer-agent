@@ -16,6 +16,30 @@ from bs4 import BeautifulSoup, Comment
 logger = logging.getLogger(__name__)
 
 
+# Title substrings that identify a soft-404 / error page returned with HTTP 200.
+# Pricerite's 404 page title is "404 無法顯示頁面 :- Pricerite實惠網店（香港）".
+# Matching on these prevents uploading error-page content to Builder.io.
+_SOFT_404_TITLE_MARKERS: tuple[str, ...] = (
+    "404",
+    "無法顯示",   # "Cannot display"
+    "找不到",     # "Not found"
+    "not found",
+    "page not found",
+    "error 404",
+)
+
+
+def _is_soft_404_title(title: str) -> bool:
+    """Return True when a page title looks like an error / not-found page."""
+    if not title:
+        return False
+    lower = title.lower()
+    for marker in _SOFT_404_TITLE_MARKERS:
+        if marker in title or marker in lower:
+            return True
+    return False
+
+
 # Shared HTML cleanup so blog posts and static CMS pages produce identical
 # fragments. Live capture already uses the same selectors for both page types;
 # this keeps the legacy HTML fallback aligned.
@@ -330,6 +354,13 @@ class BlogScraper:
                 title = el.get_text(strip=True)
                 break
 
+        if _is_soft_404_title(title):
+            logger.error(
+                f"Soft 404 detected for {url_key}: title='{title}'. "
+                "Check SOURCE_BLOG_PATH — the URL constructed by the scraper is returning an error page."
+            )
+            return {"error": f"Soft 404: page title is '{title}'", "url_key": url_key}
+
         html_content = _extract_main_html(soup, _MAGENTO_CONTENT_SELECTORS)
 
         thumbnail = ""
@@ -539,6 +570,13 @@ class StaticPageScraper:
             if el:
                 title = el.get_text(strip=True)
                 break
+
+        if _is_soft_404_title(title):
+            logger.error(
+                f"Soft 404 detected for {url_key}: title='{title}'. "
+                "The URL is returning an error page — verify the page URL is correct."
+            )
+            return {"error": f"Soft 404: page title is '{title}'", "url_key": url_key}
 
         # Main content area — shared selectors + cleanup with the blog parser
         # so static pages and blog posts yield identical fragments.
